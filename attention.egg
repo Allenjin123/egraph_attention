@@ -1,0 +1,37 @@
+(datatype Tensor
+  (CreateTensor i64 i64 String)
+  ; QK_{m,p} = Q_{e,p} * K_{e,m}, iterate over {e,m,p}, reduce over e
+  (M_mul_emp_R_add_e Tensor Tensor)
+  ; GM_p = max_m(QK_{m,p}), iterate over {m,p}, reduce over m
+  (M_none_mp_R_max_m Tensor)
+  ; SN_{m,p} = exp(QK_{m,p} - GM_p), iterate over {m,p}, no reduction
+  (M_subexp_mp_R_none Tensor Tensor)
+  ; SD_p = sum_m(SN_{m,p}), iterate over {m,p}, reduce over m
+  (M_none_mp_R_add_m Tensor)
+  ; A_{m,p} = SN_{m,p} / SD_p, iterate over {m,p}, no reduction
+  (M_div_mp_R_none Tensor Tensor)
+  ; AV_{f,p} = A_{m,p} * V_{f,m}, iterate over {f,m,p}, reduce over m
+  (M_mul_fmp_R_add_m Tensor Tensor)
+  )
+
+; create tensors
+;                    E   P
+(let Q (CreateTensor 64 1024 "Q"))   ; Q_{e,p}
+(let K (CreateTensor 64 1024 "K"))   ; K_{e,m}
+(let V (CreateTensor 64 1024 "V"))   ; V_{f,m}
+
+; ============================================
+; 3-Pass Attention (with rank annotations)
+; ============================================
+; Ranks: e (embedding), m (sequence for K/V), p (sequence for Q), f (embedding for V)
+; ============================================
+
+; compute attention
+(let QK (M_mul_emp_R_add_e Q K))     ; QK_{m,p}: iterate {e,m,p}, reduce e
+(let GM (M_none_mp_R_max_m QK))      ; GM_p: iterate {m,p}, reduce m
+(let SN (M_subexp_mp_R_none QK GM))  ; SN_{m,p}: iterate {m,p}, no reduce
+(let SD (M_none_mp_R_add_m SN))      ; SD_p: iterate {m,p}, reduce m
+(let A (M_div_mp_R_none SN SD))      ; A_{m,p}: iterate {m,p}, no reduce
+(let AV (M_mul_fmp_R_add_m A V))     ; AV_{f,p}: iterate {f,m,p}, reduce m
+
+(extract AV)
