@@ -1,175 +1,165 @@
 # Operator Notation Summary
 
+## Design Philosophy: Split Map and Reduce
+
+Map and reduce operations are **always separate** to enable compositional rewrite rules. This allows inserting transformations (e.g., tiling) between map and reduce.
+
 ## Notation Convention
 
-### Format: `M_<iteration_space>_R_<reduce_op>_<reduce_rank>`
+### Map Operations: `M_<operation>_<iteration_space>`
 
-- **M_** = Map operation (defines iteration space)
-- **<iteration_space>** = ALL ranks being iterated over (including those to be reduced)
-- **R_** = Reduce operation
-- **<reduce_op>** = Operation used for reduction (add, max, none)
-- **<reduce_rank>** = Which rank is being reduced (or "none" if no reduction)
+- **M_** = Map operation (element-wise, no reduction)
+- **<operation>** = The computation (mul, sub, exp, div)
+- **<iteration_space>** = ALL ranks in the output tensor
 
-### Key Insight
+**Example**: `M_mul_emp` - Element-wise multiply over iteration space {e,m,p}
 
-The iteration space in `M_` includes ALL dimensions, even those that will be reduced away. This directly corresponds to the Einsum iteration space.
+### Reduce Operations: `R_<operation>_<rank>`
 
-## 3-Pass Attention Operations
+- **R_** = Reduce operation (collapses a dimension)
+- **<operation>** = Reduction operator (add, max)
+- **<rank>** = Which rank to reduce
 
-```egglog
-; Tensor shapes
-Q_{e,p}    ; Query:  embedding × sequence
-K_{e,m}    ; Key:    embedding × sequence
-V_{f,m}    ; Value:  embedding × sequence
+**Example**: `R_add_e` - Reduce using addition over rank e
 
-; Operations
-M_mul_emp_R_add_e       ; Iterate {e,m,p}, reduce e
-                        ; QK_{m,p} = Σ_e Q_{e,p} × K_{e,m}
+### Tiling Operations: `T_<operation>_<from>_<to>`
 
-M_none_mp_R_max_m       ; Iterate {m,p}, reduce m
-                        ; GM_p = max_m(QK_{m,p})
+**Split**: `T_split_m_m1m0` - Split dimension m into m1 and m0
+**Unsplit**: `T_unsplit_m1m0_m` - Combine m1 and m0 back into m
 
-M_subexp_mp_R_none      ; Iterate {m,p}, no reduction
-                        ; SN_{m,p} = exp(QK_{m,p} - GM_p)
-
-M_none_mp_R_add_m       ; Iterate {m,p}, reduce m
-                        ; SD_p = Σ_m SN_{m,p}
-
-M_div_mp_R_none         ; Iterate {m,p}, no reduction
-                        ; A_{m,p} = SN_{m,p} / SD_p
-
-M_mul_fmp_R_add_m       ; Iterate {f,m,p}, reduce m
-                        ; AV_{f,p} = Σ_m A_{m,p} × V_{f,m}
-```
-
-## 2-Pass Attention Operations
-
-### Tiling Strategy
-
-**Key difference**: Only tile K and V (not Q!)
-
-```
-m = m1 × m0
-- m1: tile index (which block)
-- m0: position within tile (within block)
-
-K_{e,m} → BK_{e,m1,m0}
-V_{f,m} → BV_{f,m1,m0}
-Q_{e,p} stays untiled
-```
-
-### Operations
+## 3-Pass Attention
 
 ```egglog
-; Tensor shapes after tiling
-Q_{e,p}         ; Query: NOT tiled
-BK_{e,m1,m0}    ; Key: tiled along m
-BV_{f,m1,m0}    ; Value: tiled along m
+; Step 1: QK = Q @ K
+QK_temp = M_mul_emp(Q, K)     ; Map multiply: temp_{e,m,p}
+QK = R_add_e(QK_temp)         ; Reduce e: QK_{m,p}
 
-; Pass 1: Local statistics
-M_mul_em1m0p_R_add_e      ; Iterate {e,m1,m0,p}, reduce e
-                          ; BQK_{m1,m0,p} = Σ_e Q_{e,p} × BK_{e,m1,m0}
+; Step 2: GM = max(QK)
+GM = R_max_m(QK)              ; Reduce m: GM_p
 
-M_none_m1m0p_R_max_m0     ; Iterate {m1,m0,p}, reduce m0
-                          ; LM_{m1,p} = max_{m0}(BQK_{m1,m0,p})
+; Step 3: SN = exp(QK - GM)
+QK_shifted = M_sub_mp(QK, GM) ; Map subtract
+SN = M_exp_mp(QK_shifted)     ; Map exp
 
-; ──────────────────────────────────────────────────────────
-; BARRIER: Global reduction over m1
-; ──────────────────────────────────────────────────────────
-M_none_m1p_R_max_m1       ; Iterate {m1,p}, reduce m1
-                          ; GM_p = max_{m1}(LM_{m1,p})
+; Step 4: SD = sum(SN)
+SD = R_add_m(SN)              ; Reduce m: SD_p
 
-M_subexp_m1m0p_R_none     ; Iterate {m1,m0,p}, no reduction
-                          ; SLN_{m1,m0,p} = exp(BQK - LM)
+; Step 5: A = SN / SD
+A = M_div_mp(SN, SD)          ; Map divide
 
-M_none_m1m0p_R_add_m0     ; Iterate {m1,m0,p}, reduce m0
-                          ; SLD_{m1,p} = Σ_{m0} SLN_{m1,m0,p}
-
-; Pass 2: Correction
-M_sub_m1p_R_none          ; Iterate {m1,p}, no reduction
-                          ; Subtract element-wise
-
-M_exp_m1p_R_none          ; Iterate {m1,p}, no reduction
-                          ; PRM_{m1,p} = exp(LM_{m1,p} - GM_p)
-
-M_mul_m1m0p_R_none        ; Iterate {m1,m0,p}, no reduction
-                          ; CN_{m1,m0,p} = SLN_{m1,m0,p} × PRM_{m1,p}
-
-M_mul_m1p_R_none          ; Iterate {m1,p}, no reduction
-                          ; CD_{m1,p} = SLD_{m1,p} × PRM_{m1,p}
-
-M_div_m1m0p_R_none        ; Iterate {m1,m0,p}, no reduction
-                          ; A_{m1,m0,p} = CN_{m1,m0,p} / CD_{m1,p}
-
-M_mul_fm1m0p_R_add_m0     ; Iterate {f,m1,m0,p}, reduce m0
-                          ; AV_{f,m1,p} = Σ_{m0} A_{m1,m0,p} × BV_{f,m1,m0}
+; Step 6: AV = A @ V
+AV_temp = M_mul_fmp(A, V)     ; Map multiply: temp_{f,m,p}
+AV = R_add_m(AV_temp)         ; Reduce m: AV_{f,p}
 ```
 
-## Key Differences: 3-Pass vs 2-Pass
+## 2-Pass Attention
 
-### Iteration Spaces
+### Tiling: Only K (not Q, not V)
 
-**3-Pass**: Simple ranks {e, m, p, f}
-**2-Pass**: Tiled ranks {e, m1, m0, p, f} where m = m1 × m0
-
-### Tiling
-
-**3-Pass**: No explicit tiling
-**2-Pass**:
-- Tile K and V: `T_split_m`
-- Q remains untiled
-- Compute BQK from Q and tiled BK
-
-### Barriers
-
-**3-Pass**:
-1. `M_none_mp_R_max_m`: Global max over all m
-2. `M_none_mp_R_add_m`: Global sum over all m
-
-**2-Pass**:
-1. `M_none_m1p_R_max_m1`: Global max over tiles (m1)
-   - This is the ONLY barrier between Pass 1 and Pass 2!
-
-## Why This Notation is Better
-
-### 1. Clarity of Iteration Space
 ```egglog
-M_mul_emp_R_add_e
+BK = T_split_m_m1m0(K, 4)     ; K_{e,m} → BK_{e,m1,m0}
 ```
-Immediately tells you:
-- Iterate over {e, m, p}
-- Reduce over e
-- Result has shape {m, p}
 
-### 2. Explicit Reduction
+### Pass 1: Local Statistics + Global Max
+
 ```egglog
-M_div_mp_R_none
-```
-The `R_none` makes it explicit that there's no reduction (element-wise operation).
+; BQK = Q @ BK (tiled matmul)
+BQK_temp = M_mul_em1m0p(Q, BK)    ; Map: temp_{e,m1,m0,p}
+BQK = R_add_e(BQK_temp)           ; Reduce e: BQK_{m1,m0,p}
 
-### 3. Identifies Barriers
+; Local max per tile
+LM = R_max_m0(BQK)                ; LM_{m1,p} = max_{m0}(BQK)
+
+; ──────────────── BARRIER ────────────────
+GM = R_max_m1(LM)                 ; GM_p = max_{m1}(LM)
+; ─────────────────────────────────────────
+
+; Local numerator
+BQK_shifted = M_sub_m1m0p(BQK, LM)
+SLN = M_exp_m1m0p(BQK_shifted)    ; SLN_{m1,m0,p}
+
+; Local denominator
+SLD = R_add_m0(SLN)               ; SLD_{m1,p} = Σ_{m0} SLN
+```
+
+### Pass 2: Correction + Output
+
 ```egglog
-M_none_m1p_R_max_m1  ← Reduces over m1 (tiles)
-                     ← This requires ALL tiles to finish!
-                     ← BARRIER!
+; Correction factor
+LM_GM_diff = M_sub_m1p(LM, GM)
+PRM = M_exp_m1p(LM_GM_diff)       ; PRM_{m1,p} = exp(LM - GM)
+
+; Correct numerator and denominator
+CN = M_mul_m1m0p(SLN, PRM)        ; CN_{m1,m0,p}
+CD = M_mul_m1p(SLD, PRM)          ; CD_{m1,p}
+
+; Global denominator
+GD = R_add_m1(CD)                 ; GD_p = Σ_{m1} CD
+
+; Normalize
+A_tiled = M_div_m1m0p(CN, GD)     ; A_{m1,m0,p} = CN / GD
+
+; Untile and compute final output
+A = T_unsplit_m1m0_m(A_tiled)     ; A_{m,p}
+AV_temp = M_mul_fmp(A, V)
+AV = R_add_m(AV_temp)             ; AV_{f,p}
 ```
 
-### 4. Matches Einsum Notation
+## Benefits of Split M/R Design
+
+### 1. Compositional Rewrite Rules
+
+**Example**: Inserting tiling between map and reduce
+
+```egglog
+; 3-pass (no tiling)
+temp = M_mul_emp(Q, K)
+QK = R_add_e(temp)
+
+; Rewrite rule can match and transform:
+temp = M_mul_emp(Q, K)
+temp_tiled = insert_tiling(temp)    ; ← Inserted by rewrite rule
+QK_tiled = R_add_e(temp_tiled)
 ```
-QK_{m,p} = Σ_e Q_{e,p} × K_{e,m}
-           ↓
-M_mul_emp_R_add_e(Q, K)
-      ↑↑↑     ↑    ↑
-      emp = iteration space {e,m,p}
-           add = reduction operation
-               e = reduce over e dimension
+
+### 2. Clear Operator Semantics
+
+**Map operators** - Always element-wise, preserve all dimensions:
+- `M_mul_emp`: Multiply Q and K element-wise over {e,m,p}
+- `M_exp_mp`: Exponentiate element-wise over {m,p}
+
+**Reduce operators** - Always collapse one dimension:
+- `R_add_e`: Sum over e dimension
+- `R_max_m`: Max over m dimension
+
+### 3. Easier Pattern Matching
+
+Rewrite rules can match specific patterns:
+```egglog
+; Match: Map multiply followed by reduce
+M_mul_<space>(A, B) followed by R_add_<rank>
+
+; Transform: Insert tiling
+M_mul_<tiled_space>(A, B_tiled) followed by R_add_<rank>
 ```
 
-## Consistency Rules
+### 4. No Ambiguity
 
-1. **Always specify iteration space in M**: Include ALL ranks, even those being reduced
-2. **Always include R_<op>_<rank>**: Even if `R_none` (no reduction)
-3. **Rank order in iteration space**: Alphabetical or logical (e.g., em1m0p for tiled)
-4. **Tiled dimensions**: Use m1, m0 notation to show hierarchy
+Every operator is unambiguous:
+- `M_sub_mp` - Subtract over {m,p}
+- `M_exp_mp` - Exp over {m,p}
+- `R_max_m1` - Reduce max over m1
 
-This makes every operation self-documenting and unambiguous!
+No need for "none" placeholders!
+
+## Summary: 3-Pass vs 2-Pass
+
+| Aspect | 3-Pass | 2-Pass |
+|--------|--------|--------|
+| **Map ops** | 6 (mul, sub, exp, div, mul) | 9 |
+| **Reduce ops** | 4 (add×2, max×1) | 5 (add×3, max×2) |
+| **Tiling** | 0 | 2 (split, unsplit) |
+| **Barriers** | 2 (GM, SD) | 1 (GM) |
+| **Passes** | 3 | 2 |
+
+The split design makes it clear where rewrite rules can transform the computation!

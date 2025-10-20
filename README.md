@@ -23,22 +23,22 @@ Implementing transformer attention algorithms in egglog to explore rewrite rules
 
 ## Operator Notation
 
-### Format: `M_<iteration_space>_R_<reduce_op>_<reduce_rank>`
+**Design**: Map and Reduce are **always separate operators** to enable compositional rewrite rules.
 
-- **M_** = Map operation (defines iteration space)
-- **<iteration_space>** = ALL ranks being iterated (output shape + reduced ranks)
-- **R_** = Reduce operation
-- **<reduce_op>** = Operation for reduction (add, max, none)
-- **<reduce_rank>** = Rank being reduced (or "none")
+### Map Operations: `M_<operation>_<iteration_space>`
+- Element-wise operations, no reduction
+- Example: `M_mul_emp` - Multiply over {e,m,p}
 
-### Example
+### Reduce Operations: `R_<operation>_<rank>`
+- Collapse one dimension
+- Example: `R_add_e` - Sum over e dimension
+
+### Example: Matrix Multiply
 ```egglog
-M_mul_emp_R_add_e
+temp_{e,m,p} = M_mul_emp(Q, K)    ; Map: element-wise multiply
+QK_{m,p} = R_add_e(temp)          ; Reduce: sum over e
 ```
-- Iterate over {e, m, p}
-- Reduce using add over e
-- Output: {m, p}
-- Corresponds to: `QK_{m,p} = Σ_e Q_{e,p} × K_{e,m}`
+Corresponds to: `QK_{m,p} = Σ_e Q_{e,p} × K_{e,m}`
 
 ## Tiling Notation
 
@@ -54,12 +54,20 @@ T_unsplit_m1m0_m    ; Combine m1 and m0 back into m
 Standard attention with three passes over the data:
 
 ```egglog
-QK_{m,p} = Q_{e,p} @ K_{e,m}           ; Pass 1: Compute scores
-GM_p = max_m(QK_{m,p})                 ; Pass 1: Global max
-SN_{m,p} = exp(QK_{m,p} - GM_p)        ; Pass 2: Numerator
-SD_p = sum_m(SN_{m,p})                 ; Pass 2: Denominator
-A_{m,p} = SN_{m,p} / SD_p              ; Pass 3: Normalize
-AV_{f,p} = A_{m,p} @ V_{f,m}           ; Pass 3: Output
+; Pass 1: Compute QK and global max
+QK_temp = M_mul_emp(Q, K)
+QK = R_add_e(QK_temp)
+GM = R_max_m(QK)
+
+; Pass 2: Compute softmax numerator and denominator
+QK_shifted = M_sub_mp(QK, GM)
+SN = M_exp_mp(QK_shifted)
+SD = R_add_m(SN)
+
+; Pass 3: Normalize and compute output
+A = M_div_mp(SN, SD)
+AV_temp = M_mul_fmp(A, V)
+AV = R_add_m(AV_temp)
 ```
 
 **Memory**: O(M × P) for full QK and SN matrices
@@ -69,23 +77,28 @@ AV_{f,p} = A_{m,p} @ V_{f,m}           ; Pass 3: Output
 Tiled attention with two passes (from FuseMax paper):
 
 ```egglog
-BK_{e,m1,m0} = split(K_{e,m})          ; Tile K only
+; Tile K only
+BK = T_split_m_m1m0(K, 4)
 
 ; Pass 1: Local statistics
-BQK_{m1,m0,p} = Q_{e,p} @ BK
-LM_{m1,p} = max_{m0}(BQK)              ; Local max per tile
-GM_p = max_{m1}(LM)                    ; Global max ← BARRIER
-SLN_{m1,m0,p} = exp(BQK - LM)
-SLD_{m1,p} = sum_{m0}(SLN)
+BQK_temp = M_mul_em1m0p(Q, BK)
+BQK = R_add_e(BQK_temp)
+LM = R_max_m0(BQK)                     ; Local max per tile
+GM = R_max_m1(LM)                      ; Global max ← BARRIER
+BQK_shifted = M_sub_m1m0p(BQK, LM)
+SLN = M_exp_m1m0p(BQK_shifted)
+SLD = R_add_m0(SLN)
 
 ; Pass 2: Correction
-PRM_{m1,p} = exp(LM - GM)              ; Correction factor
-CN = SLN * PRM                         ; Correct numerator
-CD = SLD * PRM                         ; Correct denominator
-GD_p = sum_{m1}(CD)                    ; Global denominator
-A_tiled = CN / GD
-A_{m,p} = unsplit(A_tiled)
-AV_{f,p} = A @ V
+LM_GM_diff = M_sub_m1p(LM, GM)
+PRM = M_exp_m1p(LM_GM_diff)
+CN = M_mul_m1m0p(SLN, PRM)
+CD = M_mul_m1p(SLD, PRM)
+GD = R_add_m1(CD)                      ; Global denominator
+A_tiled = M_div_m1m0p(CN, GD)
+A = T_unsplit_m1m0_m(A_tiled)
+AV_temp = M_mul_fmp(A, V)
+AV = R_add_m(AV_temp)
 ```
 
 **Memory**: O(M0 × P) per tile, where M0 << M

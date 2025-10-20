@@ -1,17 +1,15 @@
 (datatype Tensor
   (CreateTensor i64 i64 String)
-  ; QK_{m,p} = Q_{e,p} * K_{e,m}, iterate over {e,m,p}, reduce over e
-  (M_mul_emp_R_add_e Tensor Tensor)
-  ; GM_p = max_m(QK_{m,p}), iterate over {m,p}, reduce over m
-  (M_none_mp_R_max_m Tensor)
-  ; SN_{m,p} = exp(QK_{m,p} - GM_p), iterate over {m,p}, no reduction
-  (M_subexp_mp_R_none Tensor Tensor)
-  ; SD_p = sum_m(SN_{m,p}), iterate over {m,p}, reduce over m
-  (M_none_mp_R_add_m Tensor)
-  ; A_{m,p} = SN_{m,p} / SD_p, iterate over {m,p}, no reduction
-  (M_div_mp_R_none Tensor Tensor)
-  ; AV_{f,p} = A_{m,p} * V_{f,m}, iterate over {f,m,p}, reduce over m
-  (M_mul_fmp_R_add_m Tensor Tensor)
+  ; Map operations (element-wise, no reduction)
+  (M_mul_emp Tensor Tensor)
+  (M_sub_mp Tensor Tensor)
+  (M_exp_mp Tensor)
+  (M_div_mp Tensor Tensor)
+  (M_mul_fmp Tensor Tensor)
+  ; Reduce operations (no map)
+  (R_add_e Tensor)
+  (R_max_m Tensor)
+  (R_add_m Tensor)
   )
 
 ; create tensors
@@ -21,17 +19,20 @@
 (let V (CreateTensor 64 1024 "V"))   ; V_{f,m}
 
 ; ============================================
-; 3-Pass Attention (with rank annotations)
+; 3-Pass Attention (with split M/R operators)
 ; ============================================
 ; Ranks: e (embedding), m (sequence for K/V), p (sequence for Q), f (embedding for V)
 ; ============================================
 
 ; compute attention
-(let QK (M_mul_emp_R_add_e Q K))     ; QK_{m,p}: iterate {e,m,p}, reduce e
-(let GM (M_none_mp_R_max_m QK))      ; GM_p: iterate {m,p}, reduce m
-(let SN (M_subexp_mp_R_none QK GM))  ; SN_{m,p}: iterate {m,p}, no reduce
-(let SD (M_none_mp_R_add_m SN))      ; SD_p: iterate {m,p}, reduce m
-(let A (M_div_mp_R_none SN SD))      ; A_{m,p}: iterate {m,p}, no reduce
-(let AV (M_mul_fmp_R_add_m A V))     ; AV_{f,p}: iterate {f,m,p}, reduce m
+(let QK_temp (M_mul_emp Q K))        ; temp_{e,m,p}: map multiply
+(let QK (R_add_e QK_temp))           ; QK_{m,p}: reduce e
+(let GM (R_max_m QK))                ; GM_p: reduce m
+(let QK_shifted (M_sub_mp QK GM))    ; QK - GM
+(let SN (M_exp_mp QK_shifted))       ; SN_{m,p}: exp(QK - GM)
+(let SD (R_add_m SN))                ; SD_p: reduce m
+(let A (M_div_mp SN SD))             ; A_{m,p}: divide
+(let AV_temp (M_mul_fmp A V))        ; temp_{f,m,p}: map multiply
+(let AV (R_add_m AV_temp))           ; AV_{f,p}: reduce m
 
 (extract AV)
