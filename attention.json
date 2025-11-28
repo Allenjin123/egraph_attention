@@ -1,0 +1,211 @@
+{
+  "nodes": {
+    "primitive-i64-64": {
+      "op": "64",
+      "children": [],
+      "eclass": "i64-64",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-i64-1024": {
+      "op": "1024",
+      "children": [],
+      "eclass": "i64-1024",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-0": {
+      "op": "\"Q\"",
+      "children": [],
+      "eclass": "String-0",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-0"
+      ],
+      "eclass": "Tensor-0",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-1": {
+      "op": "\"K\"",
+      "children": [],
+      "eclass": "String-1",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-1-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-1"
+      ],
+      "eclass": "Tensor-1",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-2": {
+      "op": "\"V\"",
+      "children": [],
+      "eclass": "String-2",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-2-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-2"
+      ],
+      "eclass": "Tensor-2",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_emp": {
+      "op": "M_mul_emp",
+      "children": [
+        "function-0-CreateTensor",
+        "function-1-CreateTensor"
+      ],
+      "eclass": "Tensor-3",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_sub_mp": {
+      "op": "M_sub_mp",
+      "children": [
+        "function-0-R_add_e",
+        "function-0-R_max_m"
+      ],
+      "eclass": "Tensor-6",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_exp_mp": {
+      "op": "M_exp_mp",
+      "children": [
+        "function-0-M_sub_mp"
+      ],
+      "eclass": "Tensor-7",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_div_mp": {
+      "op": "M_div_mp",
+      "children": [
+        "function-0-M_exp_mp",
+        "function-0-R_add_m"
+      ],
+      "eclass": "Tensor-9",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_fmp": {
+      "op": "M_mul_fmp",
+      "children": [
+        "function-0-M_div_mp",
+        "function-2-CreateTensor"
+      ],
+      "eclass": "Tensor-10",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_e": {
+      "op": "R_add_e",
+      "children": [
+        "function-0-M_mul_emp"
+      ],
+      "eclass": "Tensor-4",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_max_m": {
+      "op": "R_max_m",
+      "children": [
+        "function-0-R_add_e"
+      ],
+      "eclass": "Tensor-5",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_m": {
+      "op": "R_add_m",
+      "children": [
+        "function-0-M_exp_mp"
+      ],
+      "eclass": "Tensor-8",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-1-R_add_m": {
+      "op": "R_add_m",
+      "children": [
+        "function-0-M_mul_fmp"
+      ],
+      "eclass": "Tensor-11",
+      "cost": 1.0,
+      "subsumed": false
+    }
+  },
+  "root_eclasses": [],
+  "class_data": {
+    "Tensor-0": {
+      "type": "Tensor"
+    },
+    "i64-64": {
+      "type": "i64"
+    },
+    "i64-1024": {
+      "type": "i64"
+    },
+    "String-0": {
+      "type": "String"
+    },
+    "Tensor-1": {
+      "type": "Tensor"
+    },
+    "String-1": {
+      "type": "String"
+    },
+    "Tensor-2": {
+      "type": "Tensor"
+    },
+    "String-2": {
+      "type": "String"
+    },
+    "Tensor-3": {
+      "type": "Tensor"
+    },
+    "Tensor-6": {
+      "type": "Tensor"
+    },
+    "Tensor-4": {
+      "type": "Tensor"
+    },
+    "Tensor-5": {
+      "type": "Tensor"
+    },
+    "Tensor-7": {
+      "type": "Tensor"
+    },
+    "Tensor-9": {
+      "type": "Tensor"
+    },
+    "Tensor-8": {
+      "type": "Tensor"
+    },
+    "Tensor-10": {
+      "type": "Tensor"
+    },
+    "Tensor-11": {
+      "type": "Tensor"
+    }
+  }
+}
