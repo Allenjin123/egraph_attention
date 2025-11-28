@@ -523,15 +523,292 @@ if __name__ == "__main__":
 
 
 # ============================================================================
+# 2-Pass Fused Kernel (Tiled Attention)
+# ============================================================================
+
+class TwoPassCodeGen:
+    """Generate 2-pass tiled Triton kernel for attention."""
+
+    def __init__(self, graph: ComputationGraph):
+        self.graph = graph
+
+    def generate(self) -> str:
+        """Generate 2-pass Triton implementation."""
+        code = [IMPORTS_TEMPLATE]
+        code.append(self._generate_2pass_kernel())
+        code.append(self._generate_wrapper())
+        code.append(self._generate_test())
+        return '\n'.join(code)
+
+    def _generate_2pass_kernel(self) -> str:
+        """Generate the 2-pass fused Triton kernel."""
+        return '''
+# ===== 2-Pass Tiled Attention Kernel =====
+# Generated from egglog computation graph (FuseMax style)
+#
+# Pass 1: Process tiles, compute local max/sum
+# Barrier: Compute global max from local maxes
+# Pass 2: Apply correction factor, compute output
+
+@triton.jit
+def _egg_attention_2pass_kernel(
+    Q_ptr, K_ptr, V_ptr, Out_ptr,
+    stride_qb, stride_qh, stride_qm, stride_qk,
+    stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_vb, stride_vh, stride_vn, stride_vk,
+    stride_ob, stride_oh, stride_om, stride_ok,
+    batch_size, num_heads, seq_len_q, seq_len_k, head_dim,
+    scale,
+    NUM_TILES: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # Tile size (m0)
+    BLOCK_K: tl.constexpr,
+):
+    """
+    2-Pass attention kernel with tiling (FuseMax algorithm).
+
+    Pass 1 (per tile):
+    - BQK = Q @ K_tile^T                    -> [BLOCK_M, BLOCK_N]
+    - LM = max(BQK, axis=1)                 -> [BLOCK_M] (local max)
+    - SLN = exp(BQK - LM)                   -> [BLOCK_M, BLOCK_N]
+    - SLD = sum(SLN, axis=1)                -> [BLOCK_M] (local sum)
+
+    Barrier:
+    - GM = max(LM across all tiles)         -> [BLOCK_M] (global max)
+
+    Pass 2 (correction):
+    - PRM = exp(LM - GM)                    -> correction factor per tile
+    - CN = SLN * PRM                        -> corrected numerator
+    - CD = SLD * PRM                        -> corrected denominator
+    - GD = sum(CD across tiles)             -> [BLOCK_M] (global denominator)
+    - A = CN / GD                           -> normalized attention
+    - Out += A @ V_tile                     -> accumulate output
+    """
+    pid_batch = tl.program_id(0)
+    pid_head = tl.program_id(1)
+    pid_m = tl.program_id(2)
+
+    # Query block offsets
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    # Load Q block [BLOCK_M, BLOCK_K]
+    q_ptrs = Q_ptr + (pid_batch * stride_qb + pid_head * stride_qh +
+                      offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+    q_mask = (offs_m[:, None] < seq_len_q) & (offs_k[None, :] < head_dim)
+    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
+
+    # Storage for per-tile local statistics
+    # We need to store local_max and local_sum for each tile
+    # Since we can't have dynamic arrays in Triton, we compute in two passes
+
+    # ===== PASS 1: Compute local statistics for each tile =====
+    # Also compute global max across tiles
+
+    global_max = tl.full([BLOCK_M], value=-float('inf'), dtype=tl.float32)
+
+    # First, find global max by iterating through all tiles
+    for tile_idx in range(NUM_TILES):
+        start_n = tile_idx * BLOCK_N
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+
+        # Load K tile
+        k_ptrs = K_ptr + (pid_batch * stride_kb + pid_head * stride_kh +
+                          offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
+        k_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
+        k = tl.load(k_ptrs, mask=k_mask, other=0.0)
+
+        # Compute QK for this tile
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk = tl.dot(q, tl.trans(k), qk)
+        qk *= scale
+        qk = tl.where(offs_n[None, :] < seq_len_k, qk, float('-inf'))
+
+        # Local max for this tile
+        local_max = tl.max(qk, axis=1)  # [BLOCK_M]
+
+        # Update global max
+        global_max = tl.maximum(global_max, local_max)
+
+    # ===== PASS 2: Compute output using global max for correction =====
+    global_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)
+
+    for tile_idx in range(NUM_TILES):
+        start_n = tile_idx * BLOCK_N
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+
+        # Load K tile (again - this is the "2-pass" part)
+        k_ptrs = K_ptr + (pid_batch * stride_kb + pid_head * stride_kh +
+                          offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
+        k_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
+        k = tl.load(k_ptrs, mask=k_mask, other=0.0)
+
+        # Recompute QK
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk = tl.dot(q, tl.trans(k), qk)
+        qk *= scale
+        qk = tl.where(offs_n[None, :] < seq_len_k, qk, float('-inf'))
+
+        # Compute local max for this tile
+        local_max = tl.max(qk, axis=1)  # [BLOCK_M]
+
+        # Local softmax with local max (numerically stable within tile)
+        local_exp = tl.exp(qk - local_max[:, None])  # [BLOCK_M, BLOCK_N]
+        local_sum = tl.sum(local_exp, axis=1)       # [BLOCK_M]
+
+        # Correction factor: exp(local_max - global_max)
+        correction = tl.exp(local_max - global_max)  # [BLOCK_M]
+
+        # Corrected sum (for global denominator)
+        corrected_sum = local_sum * correction
+        global_sum += corrected_sum
+
+        # Load V tile
+        v_ptrs = V_ptr + (pid_batch * stride_vb + pid_head * stride_vh +
+                          offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk)
+        v_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
+        v = tl.load(v_ptrs, mask=v_mask, other=0.0)
+
+        # Corrected attention weights (not normalized yet)
+        # We'll normalize at the end by dividing by global_sum
+        corrected_exp = local_exp * correction[:, None]  # [BLOCK_M, BLOCK_N]
+
+        # Accumulate: corrected_exp @ V
+        acc += tl.dot(corrected_exp.to(v.dtype), v)
+
+    # Final normalization by global sum
+    acc = acc / global_sum[:, None]
+
+    # Store output
+    out_ptrs = Out_ptr + (pid_batch * stride_ob + pid_head * stride_oh +
+                          offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok)
+    out_mask = (offs_m[:, None] < seq_len_q) & (offs_k[None, :] < head_dim)
+    tl.store(out_ptrs, acc.to(Out_ptr.dtype.element_ty), mask=out_mask)
+'''
+
+    def _generate_wrapper(self) -> str:
+        """Generate Python wrapper function."""
+        return '''
+
+def egg_attention_2pass_triton(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float = None,
+) -> torch.Tensor:
+    """
+    2-Pass attention implementation generated from egglog (Triton kernel).
+
+    This uses the FuseMax algorithm:
+    - Pass 1: Compute local max across all tiles to get global max
+    - Pass 2: Use global max for numerically stable softmax, accumulate output
+
+    Args:
+        q: Query tensor [batch, heads, seq_q, dim]
+        k: Key tensor [batch, heads, seq_k, dim]
+        v: Value tensor [batch, heads, seq_k, dim]
+        scale: Scaling factor (default: 1/sqrt(dim))
+
+    Returns:
+        Output tensor [batch, heads, seq_q, dim]
+    """
+    batch_size, num_heads, seq_len_q, head_dim = q.shape
+    _, _, seq_len_k, _ = k.shape
+
+    if scale is None:
+        scale = 1.0 / math.sqrt(head_dim)
+
+    out = torch.empty_like(q)
+
+    # Block sizes - use fixed sizes for consistent shared memory usage
+    BLOCK_M = 64
+    BLOCK_N = 64  # Fixed tile size to avoid shared memory issues
+    BLOCK_K = triton.next_power_of_2(head_dim)
+
+    # Calculate number of tiles based on fixed BLOCK_N
+    num_tiles = triton.cdiv(seq_len_k, BLOCK_N)
+
+    # Grid
+    grid = (batch_size, num_heads, triton.cdiv(seq_len_q, BLOCK_M))
+
+    _egg_attention_2pass_kernel[grid](
+        q, k, v, out,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        batch_size, num_heads, seq_len_q, seq_len_k, head_dim,
+        scale,
+        NUM_TILES=num_tiles,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+    )
+
+    return out
+'''
+
+    def _generate_test(self) -> str:
+        """Generate test code."""
+        return '''
+
+# ===== Test =====
+if __name__ == "__main__":
+    import torch
+
+    torch.manual_seed(42)
+    batch_size = 1
+    num_heads = 4
+    seq_len = 256
+    head_dim = 64
+
+    Q = torch.randn(batch_size, num_heads, seq_len, head_dim,
+                    device='cuda', dtype=torch.float16)
+    K = torch.randn_like(Q)
+    V = torch.randn_like(Q)
+
+    # Run generated 2-pass attention
+    out = egg_attention_2pass_triton(Q, K, V)
+    print(f"Output shape: {out.shape}")
+
+    # Compare with PyTorch reference
+    scale = 1.0 / math.sqrt(head_dim)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
+    attn = torch.softmax(scores, dim=-1, dtype=torch.float32).to(Q.dtype)
+    ref = torch.matmul(attn, V)
+
+    diff = (out - ref).abs().max().item()
+    print(f"Max diff vs reference: {diff:.6f}")
+    if diff < 0.01:
+        print("PASSED!")
+    else:
+        print("FAILED - outputs differ")
+'''
+
+
+# ============================================================================
 # Main Entry Point
 # ============================================================================
+
+def detect_algorithm(graph: ComputationGraph) -> str:
+    """Detect whether the graph represents 3-pass or 2-pass attention."""
+    ops = graph.unique_ops
+
+    # 2-pass indicators: tiled operations
+    tiled_ops = {'T_split_m_m1m0', 'T_unsplit_m1m0_m', 'R_max_m0', 'R_max_m1',
+                 'R_add_m0', 'R_add_m1', 'M_sub_m1m0p', 'M_exp_m1m0p'}
+
+    if ops & tiled_ops:
+        return '2pass'
+    else:
+        return '3pass'
+
 
 def generate_code(graph: ComputationGraph, strategy: str = 'fused') -> str:
     """Generate code from computation graph.
 
     Args:
         graph: Parsed computation graph
-        strategy: 'composable' or 'fused'
+        strategy: 'composable', 'fused', or 'auto' (auto-detect algorithm)
 
     Returns:
         Generated Python/Triton code as string
@@ -539,7 +816,20 @@ def generate_code(graph: ComputationGraph, strategy: str = 'fused') -> str:
     if strategy == 'composable':
         codegen = ComposableCodeGen(graph)
     elif strategy == 'fused':
-        codegen = FusedCodeGen(graph)
+        # Auto-detect algorithm type
+        algo = detect_algorithm(graph)
+        if algo == '2pass':
+            print(f"Detected 2-pass tiled attention algorithm")
+            codegen = TwoPassCodeGen(graph)
+        else:
+            print(f"Detected 3-pass attention algorithm")
+            codegen = FusedCodeGen(graph)
+    elif strategy == 'auto':
+        algo = detect_algorithm(graph)
+        if algo == '2pass':
+            codegen = TwoPassCodeGen(graph)
+        else:
+            codegen = FusedCodeGen(graph)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
