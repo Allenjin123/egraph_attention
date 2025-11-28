@@ -24,6 +24,10 @@ import seaborn as sns
 # Import our Triton implementations
 from triton_attention import triton_naive_attention, triton_truly_naive_attention
 
+# Import egglog-generated attention kernels
+from generated_attention import egg_attention_triton as egg_3pass_attention
+from generated_2pass_attention import egg_attention_2pass_triton as egg_2pass_attention
+
 
 # ============================================================================
 # Attention Implementations
@@ -79,6 +83,27 @@ def triton_truly_naive(Q, K, V, scale, causal=True):
     return triton_truly_naive_attention(Q, K, V, scale=scale, causal=causal)
 
 
+def egg_3pass(Q, K, V, scale, causal=True):
+    """
+    Egglog-generated 3-pass attention (no causal support yet)
+    - Pass 1: Compute QK, find row max
+    - Pass 2: Compute exp sum
+    - Pass 3: Compute output
+    """
+    # Note: egglog-generated kernel doesn't support causal masking yet
+    return egg_3pass_attention(Q, K, V, scale=scale)
+
+
+def egg_2pass(Q, K, V, scale, causal=True):
+    """
+    Egglog-generated 2-pass tiled attention (FuseMax algorithm)
+    - Pass 1: Find global max from local tile maxes
+    - Pass 2: Apply correction factor, compute output
+    """
+    # Note: egglog-generated kernel doesn't support causal masking yet
+    return egg_2pass_attention(Q, K, V, scale=scale)
+
+
 # ============================================================================
 # Verification
 # ============================================================================
@@ -91,20 +116,32 @@ def verify_correctness(Q, K, V, scale, tolerance=0.01):
         True if all implementations match within tolerance
     """
     with torch.no_grad():
+        # Causal versions
         out_eager = eager_attention(Q, K, V, scale, causal=True)
         out_sdpa = sdpa_attention(Q, K, V, scale, causal=True)
         out_triton = triton_attention(Q, K, V, scale, causal=True)
         out_truly_naive = triton_truly_naive(Q, K, V, scale, causal=True)
 
+        # Non-causal reference for egglog kernels
+        out_eager_nc = eager_attention(Q, K, V, scale, causal=False)
+        out_egg_3pass = egg_3pass(Q, K, V, scale, causal=False)
+        out_egg_2pass = egg_2pass(Q, K, V, scale, causal=False)
+
     diff_sdpa = (out_eager - out_sdpa).abs().max().item()
     diff_triton = (out_eager - out_triton).abs().max().item()
     diff_truly_naive = (out_eager - out_truly_naive).abs().max().item()
+    diff_egg_3pass = (out_eager_nc - out_egg_3pass).abs().max().item()
+    diff_egg_2pass = (out_eager_nc - out_egg_2pass).abs().max().item()
 
     print(f"  Max diff eager vs SDPA:         {diff_sdpa:.6f}")
     print(f"  Max diff eager vs Triton:       {diff_triton:.6f}")
     print(f"  Max diff eager vs Truly Naive:  {diff_truly_naive:.6f}")
+    print(f"  Max diff eager vs Egg 3-pass:   {diff_egg_3pass:.6f} (non-causal)")
+    print(f"  Max diff eager vs Egg 2-pass:   {diff_egg_2pass:.6f} (non-causal)")
 
-    passed = diff_sdpa < tolerance and diff_triton < tolerance and diff_truly_naive < tolerance
+    passed = (diff_sdpa < tolerance and diff_triton < tolerance and
+              diff_truly_naive < tolerance and diff_egg_3pass < tolerance and
+              diff_egg_2pass < tolerance)
     return passed
 
 
@@ -213,7 +250,9 @@ def main():
         "eager": {},
         "sdpa": {},
         "triton": {},
-        "truly_naive": {}
+        "truly_naive": {},
+        "egg_3pass": {},
+        "egg_2pass": {},
     }
 
     for seq_len in seq_lengths:
@@ -278,29 +317,57 @@ def main():
             print(f"  Triton (truly naive): FAILED ({e})")
             results["truly_naive"][seq_len] = float('inf')
 
+        # Egglog-generated 3-pass (non-causal)
+        try:
+            egg_3pass_time = benchmark_kernel(
+                egg_3pass, Q, K, V, scale, False,  # non-causal
+                warmup=args.warmup, iters=args.iters
+            )
+            results["egg_3pass"][seq_len] = egg_3pass_time
+            print(f"  Egg 3-pass:           {egg_3pass_time:.3f} ms (non-causal)")
+        except Exception as e:
+            print(f"  Egg 3-pass:           FAILED ({e})")
+            results["egg_3pass"][seq_len] = float('inf')
+
+        # Egglog-generated 2-pass (non-causal)
+        try:
+            egg_2pass_time = benchmark_kernel(
+                egg_2pass, Q, K, V, scale, False,  # non-causal
+                warmup=args.warmup, iters=args.iters
+            )
+            results["egg_2pass"][seq_len] = egg_2pass_time
+            print(f"  Egg 2-pass:           {egg_2pass_time:.3f} ms (non-causal)")
+        except Exception as e:
+            print(f"  Egg 2-pass:           FAILED ({e})")
+            results["egg_2pass"][seq_len] = float('inf')
+
         # Clear cache between sequence lengths
         torch.cuda.empty_cache()
 
     # Print summary table
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 90)
     print("BENCHMARK SUMMARY")
-    print("=" * 60)
+    print("=" * 90)
 
-    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12}"
+    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12} {'Egg3Pass':<10} {'Egg2Pass':<10}"
     print(header)
-    print("-" * 52)
+    print("-" * 72)
 
     for seq_len in seq_lengths:
         eager_t = results["eager"].get(seq_len, float('inf'))
         sdpa_t = results["sdpa"].get(seq_len, float('inf'))
         triton_t = results["triton"].get(seq_len, float('inf'))
         truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
+        egg_3pass_t = results["egg_3pass"].get(seq_len, float('inf'))
+        egg_2pass_t = results["egg_2pass"].get(seq_len, float('inf'))
 
         row = f"{seq_len:<10} "
         row += f"{eager_t:<10.2f} " if eager_t != float('inf') else f"{'SKIP':<10} "
         row += f"{sdpa_t:<10.2f} " if sdpa_t != float('inf') else f"{'FAIL':<10} "
         row += f"{triton_t:<10.2f} " if triton_t != float('inf') else f"{'FAIL':<10} "
-        row += f"{truly_naive_t:<12.2f}" if truly_naive_t != float('inf') else f"{'FAIL':<12}"
+        row += f"{truly_naive_t:<12.2f} " if truly_naive_t != float('inf') else f"{'FAIL':<12} "
+        row += f"{egg_3pass_t:<10.2f} " if egg_3pass_t != float('inf') else f"{'FAIL':<10} "
+        row += f"{egg_2pass_t:<10.2f}" if egg_2pass_t != float('inf') else f"{'FAIL':<10}"
 
         print(row)
 
@@ -333,6 +400,10 @@ def main():
                 marker='^', linewidth=2, markersize=8, label='Triton (online)', color='#2ecc71')
         ax1.plot(valid_seq_lens, [results["truly_naive"][s] for s in valid_seq_lens],
                 marker='d', linewidth=2, markersize=8, label='Triton (3-pass)', color='#9b59b6')
+        ax1.plot(valid_seq_lens, [results["egg_3pass"][s] for s in valid_seq_lens],
+                marker='x', linewidth=2, markersize=8, label='Egg 3-pass', color='#f39c12')
+        ax1.plot(valid_seq_lens, [results["egg_2pass"][s] for s in valid_seq_lens],
+                marker='*', linewidth=2, markersize=10, label='Egg 2-pass', color='#1abc9c')
 
     ax1.set_xlabel('Sequence Length', fontsize=12)
     ax1.set_ylabel('Time (ms)', fontsize=12)
@@ -405,12 +476,15 @@ def main():
     # Save CSV
     csv_path = os.path.join(results_dir, f'kernel_benchmark_h{num_heads}_d{head_dim}.csv')
     with open(csv_path, 'w') as f:
-        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms\n")
+        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Egg_3pass_ms,Egg_2pass_ms\n")
         for seq_len in valid_seq_lens:
             eager_t = results["eager"].get(seq_len, float('inf'))
             truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
+            egg_3pass_t = results["egg_3pass"].get(seq_len, float('inf'))
+            egg_2pass_t = results["egg_2pass"].get(seq_len, float('inf'))
             f.write(f"{seq_len},{eager_t:.3f},{results['sdpa'][seq_len]:.3f},"
-                    f"{results['triton'][seq_len]:.3f},{truly_naive_t:.3f}\n")
+                    f"{results['triton'][seq_len]:.3f},{truly_naive_t:.3f},"
+                    f"{egg_3pass_t:.3f},{egg_2pass_t:.3f}\n")
     print(f"Results saved to: {csv_path}")
 
 
