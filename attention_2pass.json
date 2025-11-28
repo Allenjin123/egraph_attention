@@ -1,0 +1,321 @@
+{
+  "nodes": {
+    "primitive-i64-64": {
+      "op": "64",
+      "children": [],
+      "eclass": "i64-64",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-i64-1024": {
+      "op": "1024",
+      "children": [],
+      "eclass": "i64-1024",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-0": {
+      "op": "\"Q\"",
+      "children": [],
+      "eclass": "String-0",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-0"
+      ],
+      "eclass": "Tensor-0",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-1": {
+      "op": "\"K\"",
+      "children": [],
+      "eclass": "String-1",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-1-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-1"
+      ],
+      "eclass": "Tensor-1",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-2": {
+      "op": "\"V\"",
+      "children": [],
+      "eclass": "String-2",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-2-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-2"
+      ],
+      "eclass": "Tensor-2",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_em1m0p": {
+      "op": "M_mul_em1m0p",
+      "children": [
+        "function-0-CreateTensor",
+        "function-0-T_split_m_m1m0"
+      ],
+      "eclass": "Tensor-4",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_sub_m1m0p": {
+      "op": "M_sub_m1m0p",
+      "children": [
+        "function-0-R_add_e",
+        "function-0-R_max_m0"
+      ],
+      "eclass": "Tensor-8",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_exp_m1m0p": {
+      "op": "M_exp_m1m0p",
+      "children": [
+        "function-0-M_sub_m1m0p"
+      ],
+      "eclass": "Tensor-9",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_sub_m1p": {
+      "op": "M_sub_m1p",
+      "children": [
+        "function-0-R_max_m0",
+        "function-0-R_max_m1"
+      ],
+      "eclass": "Tensor-11",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_exp_m1p": {
+      "op": "M_exp_m1p",
+      "children": [
+        "function-0-M_sub_m1p"
+      ],
+      "eclass": "Tensor-12",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_m1m0p": {
+      "op": "M_mul_m1m0p",
+      "children": [
+        "function-0-M_exp_m1m0p",
+        "function-0-M_exp_m1p"
+      ],
+      "eclass": "Tensor-13",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_m1p": {
+      "op": "M_mul_m1p",
+      "children": [
+        "function-0-R_add_m0",
+        "function-0-M_exp_m1p"
+      ],
+      "eclass": "Tensor-14",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_div_m1m0p": {
+      "op": "M_div_m1m0p",
+      "children": [
+        "function-0-M_mul_m1m0p",
+        "function-0-R_add_m1"
+      ],
+      "eclass": "Tensor-16",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_mul_fmp": {
+      "op": "M_mul_fmp",
+      "children": [
+        "function-0-T_unsplit_m1m0_m",
+        "function-2-CreateTensor"
+      ],
+      "eclass": "Tensor-18",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_e": {
+      "op": "R_add_e",
+      "children": [
+        "function-0-M_mul_em1m0p"
+      ],
+      "eclass": "Tensor-5",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_max_m0": {
+      "op": "R_max_m0",
+      "children": [
+        "function-0-R_add_e"
+      ],
+      "eclass": "Tensor-6",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_max_m1": {
+      "op": "R_max_m1",
+      "children": [
+        "function-0-R_max_m0"
+      ],
+      "eclass": "Tensor-7",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_m0": {
+      "op": "R_add_m0",
+      "children": [
+        "function-0-M_exp_m1m0p"
+      ],
+      "eclass": "Tensor-10",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_m1": {
+      "op": "R_add_m1",
+      "children": [
+        "function-0-M_mul_m1p"
+      ],
+      "eclass": "Tensor-15",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_m": {
+      "op": "R_add_m",
+      "children": [
+        "function-0-M_mul_fmp"
+      ],
+      "eclass": "Tensor-19",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-i64-4": {
+      "op": "4",
+      "children": [],
+      "eclass": "i64-4",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-T_split_m_m1m0": {
+      "op": "T_split_m_m1m0",
+      "children": [
+        "function-1-CreateTensor",
+        "primitive-i64-4"
+      ],
+      "eclass": "Tensor-3",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-T_unsplit_m1m0_m": {
+      "op": "T_unsplit_m1m0_m",
+      "children": [
+        "function-0-M_div_m1m0p"
+      ],
+      "eclass": "Tensor-17",
+      "cost": 1.0,
+      "subsumed": false
+    }
+  },
+  "root_eclasses": [],
+  "class_data": {
+    "Tensor-0": {
+      "type": "Tensor"
+    },
+    "i64-64": {
+      "type": "i64"
+    },
+    "i64-1024": {
+      "type": "i64"
+    },
+    "String-0": {
+      "type": "String"
+    },
+    "Tensor-1": {
+      "type": "Tensor"
+    },
+    "String-1": {
+      "type": "String"
+    },
+    "Tensor-2": {
+      "type": "Tensor"
+    },
+    "String-2": {
+      "type": "String"
+    },
+    "Tensor-4": {
+      "type": "Tensor"
+    },
+    "Tensor-3": {
+      "type": "Tensor"
+    },
+    "Tensor-8": {
+      "type": "Tensor"
+    },
+    "Tensor-5": {
+      "type": "Tensor"
+    },
+    "Tensor-6": {
+      "type": "Tensor"
+    },
+    "Tensor-9": {
+      "type": "Tensor"
+    },
+    "Tensor-11": {
+      "type": "Tensor"
+    },
+    "Tensor-7": {
+      "type": "Tensor"
+    },
+    "Tensor-12": {
+      "type": "Tensor"
+    },
+    "Tensor-13": {
+      "type": "Tensor"
+    },
+    "Tensor-14": {
+      "type": "Tensor"
+    },
+    "Tensor-10": {
+      "type": "Tensor"
+    },
+    "Tensor-16": {
+      "type": "Tensor"
+    },
+    "Tensor-15": {
+      "type": "Tensor"
+    },
+    "Tensor-18": {
+      "type": "Tensor"
+    },
+    "Tensor-17": {
+      "type": "Tensor"
+    },
+    "Tensor-19": {
+      "type": "Tensor"
+    },
+    "i64-4": {
+      "type": "i64"
+    }
+  }
+}
