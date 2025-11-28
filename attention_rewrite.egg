@@ -48,40 +48,36 @@
 
 ; Rule 1: Insert tiling of K in matrix multiplication
 ; This is the key transformation enabled by split M/R design!
+; Use :subsume to replace original with tiled version
 (rewrite
   (M_mul_emp q k)
   (M_mul_em1m0p q (T_split_m_m1m0 k 4))
-)
+  :subsume)
 
 ; Rule 2: Transform global max to local-then-global pattern
 (rewrite
   (R_max_m qk)
   (R_max_m1 (R_max_m0 qk))
-)
+  :subsume)
 
 ; Rule 3: Transform global sum to local-then-global pattern
 (rewrite
   (R_add_m exp_vals)
   (R_add_m1 (R_add_m0 exp_vals))
-)
+  :subsume)
 
 ; Rule 4: Adapt subtraction for tiled dimensions
-; When QK is tiled, use local max for initial subtraction
+; Use simplified rule with subsume
 (rewrite
   (M_sub_mp qk gm)
-  (M_sub_m1m0p qk lm)
-  :when ((= qk (R_add_e (M_mul_em1m0p q bk)))
-         (= bk (T_split_m_m1m0 k _))
-         (= lm (R_max_m0 qk))
-         (= gm (R_max_m1 lm)))
-)
+  (M_sub_m1m0p qk (R_max_m0 qk))
+  :subsume)
 
 ; Rule 5: Adapt exp for tiled dimensions
 (rewrite
   (M_exp_mp shifted)
   (M_exp_m1m0p shifted)
-  :when ((= shifted (M_sub_m1m0p _ _)))
-)
+  :subsume)
 
 ; Rule 6: Add correction factor computation
 ; When we have local statistics, compute correction
@@ -96,14 +92,11 @@
    (let gd (R_add_m1 cd)))                     ; Global denominator
 )
 
-; Rule 7: Transform division to use global denominator
+; Rule 7: Transform division to tiled version
 (rewrite
   (M_div_mp sn sd)
-  (M_div_m1m0p cn gd)
-  :when ((= sn (M_exp_m1m0p _))
-         (= cn (M_mul_m1m0p sn _))
-         (= gd (R_add_m1 _)))
-)
+  (M_div_m1m0p sn sd)
+  :subsume)
 
 ; Rule 8: Untile attention weights before final multiply
 (rewrite
