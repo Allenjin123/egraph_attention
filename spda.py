@@ -10,16 +10,12 @@ import gc
 
 # Import Triton attention
 try:
-    from triton_attention import inject_triton_attention, verify_triton_correctness
+    from triton_attention import inject_triton_attention, verify_triton_correctness, verify_model_correctness
     TRITON_AVAILABLE = True
     print("Triton attention available")
 except ImportError as e:
     TRITON_AVAILABLE = False
     print(f"Triton attention not available: {e}")
-
-# Set HuggingFace cache to /scratch BEFORE importing models
-os.environ['HF_HOME'] = '/scratch/nbleier_root/nbleier0/allenjin/hf'
-os.environ['HF_HUB_CACHE'] = '/scratch/nbleier_root/nbleier0/allenjin/hf/hub'
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -28,7 +24,18 @@ def get_parser():
     parser.add_argument("--model", type=str, default="facebook/opt-1.3b", help="Model to use")
     parser.add_argument("--token", type=str, default=None, help="HuggingFace token for gated models")
     parser.add_argument("--seq-lengths", type=str, default="256,512,1024", help="Comma-separated sequence lengths")
+    parser.add_argument("--server", action="store_true", help="Use /scratch cache directory (for server environment)")
     return parser
+
+
+def setup_cache(use_server: bool):
+    """Set HuggingFace cache directory based on environment."""
+    if use_server:
+        os.environ['HF_HOME'] = '/scratch/nbleier_root/nbleier0/allenjin/hf'
+        os.environ['HF_HUB_CACHE'] = '/scratch/nbleier_root/nbleier0/allenjin/hf/hub'
+        print(f"Using server cache: {os.environ['HF_HOME']}")
+    else:
+        print(f"Using default cache: {os.environ.get('HF_HOME', '~/.cache/huggingface')}")
 
 @torch.no_grad()
 def warmup_and_benchmark(model, tokenizer, max_seq_len, num_batches, max_new_tokens):
@@ -88,14 +95,16 @@ def warmup_and_benchmark(model, tokenizer, max_seq_len, num_batches, max_new_tok
 def main():
     parser = get_parser()
     args = parser.parse_args()
-    
+
+    # Setup cache directory before loading any models
+    setup_cache(args.server)
+
     model_id = args.model
     token = args.token
     seq_lengths = [int(x.strip()) for x in args.seq_lengths.split(",")]
     
     print(f"Using model: {model_id}")
     print(f"Sequence lengths: {seq_lengths}")
-    print(f"HF cache dir: {os.environ.get('HF_HOME', 'default')}")
     
     if not torch.cuda.is_available():
         print("CUDA not available! This script requires a GPU.")
@@ -103,7 +112,30 @@ def main():
     
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    
+
+    # Verify Triton correctness before benchmarking
+    global TRITON_AVAILABLE
+    if TRITON_AVAILABLE:
+        print("\n" + "="*60)
+        print("VERIFYING TRITON CORRECTNESS (Kernel)")
+        print("="*60)
+        if verify_triton_correctness():
+            print("Kernel verification PASSED")
+        else:
+            print("WARNING: Kernel verification FAILED - skipping Triton benchmark")
+            TRITON_AVAILABLE = False
+
+    # Model-level verification (more thorough)
+    if TRITON_AVAILABLE:
+        print("\n" + "="*60)
+        print("VERIFYING TRITON CORRECTNESS (Model)")
+        print("="*60)
+        if verify_model_correctness(model_id, seq_len=256, token=token):
+            print("Model verification PASSED - proceeding with benchmark")
+        else:
+            print("WARNING: Model verification FAILED - skipping Triton benchmark")
+            TRITON_AVAILABLE = False
+
     # Load tokenizer
     print("\nLoading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=token)
