@@ -1,0 +1,191 @@
+; ============================================================
+; Attention Algorithm Rewrite Rules
+; ============================================================
+; Transform 3-pass attention into 2-pass tiled attention
+; using compositional rewrite rules enabled by split M/R design
+; ============================================================
+
+(datatype Tensor
+  (CreateTensor i64 i64 String)
+
+  ; Tiling operations
+  (T_split_m_m1m0 Tensor i64)      ; Split m into tiles
+  (T_unsplit_m1m0_m Tensor)        ; Combine tiles back
+
+  ; Map operations (element-wise, no reduction)
+  (M_mul_emp Tensor Tensor)        ; Multiply over {e,m,p}
+  (M_mul_em1m0p Tensor Tensor)     ; Multiply over {e,m1,m0,p}
+  (M_mul_fmp Tensor Tensor)        ; Multiply over {f,m,p}
+  (M_sub_mp Tensor Tensor)         ; Subtract over {m,p}
+  (M_sub_m1m0p Tensor Tensor)      ; Subtract over {m1,m0,p}
+  (M_sub_m1p Tensor Tensor)        ; Subtract over {m1,p}
+  (M_exp_mp Tensor)                ; Exp over {m,p}
+  (M_exp_m1m0p Tensor)             ; Exp over {m1,m0,p}
+  (M_exp_m1p Tensor)               ; Exp over {m1,p}
+  (M_div_mp Tensor Tensor)         ; Divide over {m,p}
+  (M_div_m1m0p Tensor Tensor)      ; Divide over {m1,m0,p}
+  (M_mul_m1m0p Tensor Tensor)      ; Multiply over {m1,m0,p}
+  (M_mul_m1p Tensor Tensor)        ; Multiply over {m1,p}
+
+  ; Reduce operations (collapse dimension)
+  (R_add_e Tensor)                 ; Sum over e dimension
+  (R_add_m Tensor)                 ; Sum over m dimension
+  (R_add_m0 Tensor)                ; Sum over m0 dimension (within tile)
+  (R_add_m1 Tensor)                ; Sum over m1 dimension (across tiles)
+  (R_max_m Tensor)                 ; Max over m dimension
+  (R_max_m0 Tensor)                ; Max over m0 dimension (within tile)
+  (R_max_m1 Tensor)                ; Max over m1 dimension (across tiles)
+)
+
+; ============================================================
+; CORE REWRITE RULES
+; ============================================================
+; These rules transform 3-pass attention to 2-pass by:
+; 1. Inserting tiling of K
+; 2. Converting global operations to local-then-global
+; 3. Adding correction factors
+; ============================================================
+
+; Rule 1: Insert tiling of K in matrix multiplication
+; This is the key transformation enabled by split M/R design!
+; Use :subsume to replace original with tiled version
+(rewrite
+  (M_mul_emp q k)
+  (M_mul_em1m0p q (T_split_m_m1m0 k 4))
+  :subsume)
+
+; Rule 2: Transform global max to local-then-global pattern
+(rewrite
+  (R_max_m qk)
+  (R_max_m1 (R_max_m0 qk))
+  :subsume)
+
+; Rule 3: Transform global sum to local-then-global pattern
+(rewrite
+  (R_add_m exp_vals)
+  (R_add_m1 (R_add_m0 exp_vals))
+  :subsume)
+
+; Rule 4: Adapt subtraction for tiled dimensions
+; Use simplified rule with subsume
+(rewrite
+  (M_sub_mp qk gm)
+  (M_sub_m1m0p qk (R_max_m0 qk))
+  :subsume)
+
+; Rule 5: Adapt exp for tiled dimensions
+(rewrite
+  (M_exp_mp shifted)
+  (M_exp_m1m0p shifted)
+  :subsume)
+
+; Rule 6: Add correction factor computation
+; When we have local statistics, compute correction
+(rule
+  ((= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
+   (= lm (R_max_m0 bqk))
+   (= gm (R_max_m1 lm))
+   (= sld (R_add_m0 sln)))
+  ((let prm (M_exp_m1p (M_sub_m1p lm gm)))     ; Correction factor
+   (let cn (M_mul_m1m0p sln prm))              ; Corrected numerator
+   (let cd (M_mul_m1p sld prm))                ; Corrected denominator
+   (let gd (R_add_m1 cd)))                     ; Global denominator
+)
+
+; Rule 7: Transform division to tiled version
+(rewrite
+  (M_div_mp sn sd)
+  (M_div_m1m0p sn sd)
+  :subsume)
+
+; Rule 8: Untile attention weights before final multiply
+(rewrite
+  (M_mul_fmp a v)
+  (M_mul_fmp (T_unsplit_m1m0_m a) v)
+  :when ((= a (M_div_m1m0p _ _)))
+)
+
+; ============================================================
+; EXAMPLE: 3-Pass Attention
+; ============================================================
+; Define the standard 3-pass attention algorithm
+; The rewrite rules will automatically transform it to 2-pass
+; ============================================================
+
+; Create input tensors
+(let Q (CreateTensor 64 1024 "Q"))   ; Query: {e,p}
+(let K (CreateTensor 64 1024 "K"))   ; Key: {e,m}
+(let V (CreateTensor 64 1024 "V"))   ; Value: {f,m}
+
+; Step 1: Compute QK = Q @ K^T
+(let QK_temp (M_mul_emp Q K))        ; Map: element-wise multiply
+(let QK (R_add_e QK_temp))           ; Reduce: sum over e dimension
+
+; Step 2: Compute global max for numerical stability
+(let GM (R_max_m QK))                ; Max over m dimension
+
+; Step 3: Compute softmax numerator
+(let QK_shifted (M_sub_mp QK GM))    ; Subtract max for stability
+(let SN (M_exp_mp QK_shifted))       ; Exponential
+
+; Step 4: Compute softmax denominator
+(let SD (R_add_m SN))                ; Sum over m dimension
+
+; Step 5: Normalize to get attention weights
+(let A (M_div_mp SN SD))             ; Element-wise division
+
+; Step 6: Compute final output
+(let AV_temp (M_mul_fmp A V))        ; Map: multiply A and V
+(let AV (R_add_m AV_temp))           ; Reduce: sum over m dimension
+
+; ============================================================
+; RUN TRANSFORMATION
+; ============================================================
+
+; Apply rewrite rules (multiple iterations for fixpoint)
+(run 30)
+
+; Extract final result - this will show the transformed 2-pass version
+(extract AV)
+
+; ============================================================
+; WHAT THE REWRITE RULES DO:
+; ============================================================
+;
+; The rewrite rules automatically transform the 3-pass algorithm to:
+;
+; 1. Tile K: BK = T_split_m_m1m0(K, 4)
+;
+; 2. Compute tiled QK:
+;    BQK_temp = M_mul_em1m0p(Q, BK)
+;    BQK = R_add_e(BQK_temp)
+;
+; 3. Local max per tile:
+;    LM = R_max_m0(BQK)
+;
+; 4. Global max (synchronization barrier):
+;    GM = R_max_m1(LM)
+;
+; 5. Local softmax with local max:
+;    SLN = M_exp_m1m0p(M_sub_m1m0p(BQK, LM))
+;    SLD = R_add_m0(SLN)
+;
+; 6. Correction factor:
+;    PRM = M_exp_m1p(M_sub_m1p(LM, GM))
+;
+; 7. Corrected statistics:
+;    CN = M_mul_m1m0p(SLN, PRM)
+;    CD = M_mul_m1p(SLD, PRM)
+;
+; 8. Global denominator:
+;    GD = R_add_m1(CD)
+;
+; 9. Normalize with global denominator:
+;    A_tiled = M_div_m1m0p(CN, GD)
+;
+; 10. Untile and compute output:
+;     A = T_unsplit_m1m0_m(A_tiled)
+;     AV = A @ V
+;
+; This achieves the same result as 3-pass but with better memory efficiency!
+; ============================================================

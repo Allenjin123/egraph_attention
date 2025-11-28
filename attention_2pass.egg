@@ -1,0 +1,105 @@
+(datatype Tensor
+  (CreateTensor i64 i64 String)
+  ; Map operations (element-wise, no reduction)
+  (M_mul_em1m0p Tensor Tensor)
+  (M_sub_m1m0p Tensor Tensor)
+  (M_exp_m1m0p Tensor)
+  (M_sub_m1p Tensor Tensor)
+  (M_exp_m1p Tensor)
+  (M_mul_m1m0p Tensor Tensor)
+  (M_mul_m1p Tensor Tensor)
+  (M_div_m1m0p Tensor Tensor)
+  (M_mul_fm1m0p Tensor Tensor)
+  (M_mul_fmp Tensor Tensor)
+  ; Reduce operations (no map)
+  (R_add_e Tensor)
+  (R_max_m0 Tensor)
+  (R_max_m1 Tensor)
+  (R_add_m0 Tensor)
+  (R_add_m1 Tensor)
+  (R_add_m Tensor)
+  ; Tiling operations
+  (T_split_m_m1m0 Tensor i64)
+  (T_unsplit_m1m0_m Tensor)
+  )
+
+; create tensors
+;                    E   P
+(let Q (CreateTensor 64 1024 "Q"))   ; Q_{e,p} - NOT tiled
+(let K (CreateTensor 64 1024 "K"))   ; K_{e,m}
+(let V (CreateTensor 64 1024 "V"))   ; V_{f,m}
+
+; ============================================
+; Two-Pass Attention Algorithm (FuseMax Paper)
+; ============================================
+; Ranks:
+;   e (embedding dim for Q/K)
+;   f (embedding dim for V)
+;   p (sequence length for Q)
+;   m (sequence length for K/V) = m1 × m0
+;     m1 (tile index, e.g., 0..3 for 4 tiles)
+;     m0 (position within tile)
+; ============================================
+; Pass 1: Tile K only, compute local statistics per tile,
+;         build global max from local maxes
+; Pass 2: Use global max to correct local statistics,
+;         untile A, then compute output with V
+; ============================================
+
+; ===== Pass 1: Tile K only and compute local statistics =====
+; Split K into tiles along M dimension (M = M1 × M0)
+; BK_{e,m1,m0} = split_m_into_m1m0(K_{e,m})
+(let BK (T_split_m_m1m0 K 4))
+
+; Compute BQK from Q and tiled K
+; Map multiply: temp_{e,m1,m0,p} = Q_{e,p} * BK_{e,m1,m0}
+(let BQK_temp (M_mul_em1m0p Q BK))
+; Reduce e: BQK_{m1,m0,p}
+(let BQK (R_add_e BQK_temp))
+
+; Compute local max per tile
+; LM_{m1,p} = max_{m0}(BQK_{m1,m0,p})
+(let LM (R_max_m0 BQK))
+
+; ┌─────────────────────────────────────────────────────────────────┐
+; │ CRITICAL DEPENDENCY - FUSION BARRIER                            │
+; │ Build global max from local maxes (reduce across tiles m1)      │
+; │ GM_p = max_{m1}(LM_{m1,p})                                      │
+; │ MUST wait for ALL tiles to compute LM before GM can be computed │
+; │ This creates the boundary between Pass 1 and Pass 2!            │
+; └─────────────────────────────────────────────────────────────────┘
+(let GM (R_max_m1 LM))
+
+; These can fuse with LM computation (same pass)
+; Compute local softmax numerator: SLN_{m1,m0,p} = exp(BQK - LM)
+(let BQK_shifted (M_sub_m1m0p BQK LM))
+(let SLN (M_exp_m1m0p BQK_shifted))
+
+; Compute local softmax denominator: SLD_{m1,p} = sum_{m0}(SLN)
+(let SLD (R_add_m0 SLN))
+
+; ===== Pass 2: Correct local statistics using global max =====
+; Compute correction factor: PRM_{m1,p} = exp(LM_{m1,p} - GM_p)
+(let LM_GM_diff (M_sub_m1p LM GM))
+(let PRM (M_exp_m1p LM_GM_diff))
+
+; Correct local numerator: CN_{m1,m0,p} = SLN_{m1,m0,p} * PRM_{m1,p}
+(let CN (M_mul_m1m0p SLN PRM))
+
+; Correct local denominator: CD_{m1,p} = SLD_{m1,p} * PRM_{m1,p}
+(let CD (M_mul_m1p SLD PRM))
+
+; Compute GLOBAL denominator: GD_p = sum_{m1}(CD_{m1,p})
+(let GD (R_add_m1 CD))
+
+; Normalize: A_{m1,m0,p} = CN_{m1,m0,p} / GD_p
+(let A_tiled (M_div_m1m0p CN GD))
+
+; Untile A: A_{m,p} = unsplit_m1m0_into_m(A_{m1,m0,p})
+(let A (T_unsplit_m1m0_m A_tiled))
+
+; Multiply by V: AV_{f,p} = A_{m,p} * V_{f,m}
+(let AV_temp (M_mul_fmp A V))
+(let AV (R_add_m AV_temp))
+
+(extract AV)

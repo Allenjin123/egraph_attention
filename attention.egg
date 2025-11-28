@@ -1,0 +1,38 @@
+(datatype Tensor
+  (CreateTensor i64 i64 String)
+  ; Map operations (element-wise, no reduction)
+  (M_mul_emp Tensor Tensor)
+  (M_sub_mp Tensor Tensor)
+  (M_exp_mp Tensor)
+  (M_div_mp Tensor Tensor)
+  (M_mul_fmp Tensor Tensor)
+  ; Reduce operations (no map)
+  (R_add_e Tensor)
+  (R_max_m Tensor)
+  (R_add_m Tensor)
+  )
+
+; create tensors
+;                    E   P
+(let Q (CreateTensor 64 1024 "Q"))   ; Q_{e,p}
+(let K (CreateTensor 64 1024 "K"))   ; K_{e,m}
+(let V (CreateTensor 64 1024 "V"))   ; V_{f,m}
+
+; ============================================
+; 3-Pass Attention (with split M/R operators)
+; ============================================
+; Ranks: e (embedding), m (sequence for K/V), p (sequence for Q), f (embedding for V)
+; ============================================
+
+; compute attention
+(let QK_temp (M_mul_emp Q K))        ; temp_{e,m,p}: map multiply
+(let QK (R_add_e QK_temp))           ; QK_{m,p}: reduce e
+(let GM (R_max_m QK))                ; GM_p: reduce m
+(let QK_shifted (M_sub_mp QK GM))    ; QK - GM
+(let SN (M_exp_mp QK_shifted))       ; SN_{m,p}: exp(QK - GM)
+(let SD (R_add_m SN))                ; SD_p: reduce m
+(let A (M_div_mp SN SD))             ; A_{m,p}: divide
+(let AV_temp (M_mul_fmp A V))        ; temp_{f,m,p}: map multiply
+(let AV (R_add_m AV_temp))           ; AV_{f,p}: reduce m
+
+(extract AV)
