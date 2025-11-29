@@ -79,7 +79,7 @@ def attention_kernel(
         mexpm1m0p_M_exp_m1m0p = tl.exp(msubm1m0p_M_sub_m1m0p)
         raddm0_R_add_m0 = tl.sum(mexpm1m0p_M_exp_m1m0p, axis=1)
 
-        msubm1p_M_sub_m1p = rmaxm0_R_max_m0 - global_max[:, None]
+        msubm1p_M_sub_m1p = rmaxm0_R_max_m0 - global_max
         mexpm1p_M_exp_m1p = tl.exp(msubm1p_M_sub_m1p)
         mmulm1m0p_M_mul_m1m0p = mexpm1m0p_M_exp_m1m0p * mexpm1p_M_exp_m1p[:, None]
         mmulm1p_M_mul_m1p = raddm0_R_add_m0 * mexpm1p_M_exp_m1p

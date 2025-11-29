@@ -119,16 +119,25 @@ class OperationEmitter:
             var_b = self._get_child_var(children[1])
 
             # Add broadcasting if needed
-            # If var_b is 1D and output is 2D, add [:, None] for broadcasting
+            # For tiled operations, m1 dimension is implicit in the loop
             child_a = self.graph.nodes.get(children[0])
             child_b = self.graph.nodes.get(children[1])
 
-            # Simple heuristic: if output has more dims than input_b, broadcast
-            if (node.output_dims and child_b and child_b.output_dims and
-                len(node.output_dims.dims) > len(child_b.output_dims.dims)):
+            # Filter out m1 dimension for tiled operations
+            def effective_dims(dims):
+                """Get effective dimensions in Triton (m1 is implicit in loop)."""
+                if dims and 'm1' in dims.dims:
+                    return tuple(d for d in dims.dims if d != 'm1')
+                return dims.dims if dims else ()
+
+            output_dims_effective = effective_dims(node.output_dims)
+            child_a_dims_effective = effective_dims(child_a.output_dims) if child_a else ()
+            child_b_dims_effective = effective_dims(child_b.output_dims) if child_b else ()
+
+            # Broadcast if output has more effective dims than input
+            if len(output_dims_effective) > len(child_b_dims_effective):
                 var_b = f"{var_b}[:, None]"
-            elif (node.output_dims and child_a and child_a.output_dims and
-                  len(node.output_dims.dims) > len(child_a.output_dims.dims)):
+            elif len(output_dims_effective) > len(child_a_dims_effective):
                 var_a = f"{var_a}[:, None]"
 
             op = spec.triton_op
