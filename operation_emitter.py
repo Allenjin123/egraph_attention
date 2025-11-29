@@ -617,10 +617,27 @@ class HoleEmitter:
         if mem_info.post_loop_ops:
             # Output is from last post-loop operation
             output_node_id = mem_info.post_loop_ops[-1]
-            if output_node_id in self.op_emitter.var_map:
-                output_var = self.op_emitter.var_map[output_node_id].name
+
+            # Check if it's M_div_fp with duplicate children (ILP extraction bug)
+            if output_node_id in self.graph.nodes:
+                output_node = self.graph.nodes[output_node_id]
+                if output_node.op == 'M_div_fp' and len(output_node.children) == 2:
+                    if output_node.children[0] == output_node.children[1]:
+                        # Duplicate children (x/x) - this is a bug, work around it
+                        # Just use acc_out as output instead of trying to divide
+                        print(f"  WARNING: M_div_fp has duplicate children (ILP extraction issue), using acc_out directly")
+                        output_var = 'acc_out'
+                    elif output_node_id in self.op_emitter.var_map:
+                        output_var = self.op_emitter.var_map[output_node_id].name
+                    else:
+                        output_var = 'acc_out'
+                else:
+                    if output_node_id in self.op_emitter.var_map:
+                        output_var = self.op_emitter.var_map[output_node_id].name
+                    else:
+                        output_var = 'acc_out'
             else:
-                output_var = 'acc_out'  # Fallback
+                output_var = 'acc_out'
         else:
             # Output is from accumulator
             output_var = 'acc_out'

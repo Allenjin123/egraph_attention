@@ -51,8 +51,9 @@ except ImportError:
     pytorch_compiled = None
     print("Warning: generated_pytorch_2pass.py not found")
 
-# Import Triton graph-driven implementations (AUTO-GENERATED!)
-# Both kernels are automatically generated from egglog JSON
+# Import Triton graph-driven implementations (AUTO-GENERATED from ILP!)
+# Both kernels are automatically generated from ILP-extracted egglog JSON
+# Using 2pass-no-mdiv cost model to avoid M_div_fp duplicate children issue
 try:
     from generated_triton_2pass_auto import attention_kernel_2pass
     TRITON_GD_2PASS_AVAILABLE = True
@@ -486,58 +487,142 @@ def main():
     ax1.legend(loc='upper left', fontsize=11)
     ax1.grid(True, alpha=0.3)
 
-    # Plot 2: Speedup over Eager (or comparison between SDPA and Triton)
+    # Plot 2: Speedup over Eager (all implementations)
     ax2 = axes[1]
     if valid_seq_lens:
         x = range(len(valid_seq_lens))
-        width = 0.35
 
         if not args.skip_eager:
-            # Speedup over eager
+            # Count available implementations for bar width calculation
+            num_bars = 2  # SDPA and Triton always present
+            if PYTORCH_AVAILABLE:
+                num_bars += 1
+            if TRITON_GD_2PASS_AVAILABLE:
+                num_bars += 1
+            if TRITON_GD_3PASS_AVAILABLE:
+                num_bars += 1
+
+            width = 0.8 / num_bars  # Total width 0.8, divided among bars
+            offset = -0.4 + width / 2  # Start from left edge
+
+            # Speedup over eager for each implementation
+            bar_idx = 0
+
+            # SDPA
             sdpa_speedups = [results["eager"][s] / results["sdpa"][s]
                            if results["eager"].get(s, float('inf')) != float('inf') else 0
                            for s in valid_seq_lens]
+            bars_sdpa = ax2.bar([i + offset + bar_idx * width for i in x], sdpa_speedups, width,
+                               label='SDPA', color='#e74c3c', alpha=0.8)
+            bar_idx += 1
+
+            # Triton
             triton_speedups = [results["eager"][s] / results["triton"][s]
                              if results["eager"].get(s, float('inf')) != float('inf') else 0
                              for s in valid_seq_lens]
+            bars_triton = ax2.bar([i + offset + bar_idx * width for i in x], triton_speedups, width,
+                                 label='Triton', color='#2ecc71', alpha=0.8)
+            bar_idx += 1
 
-            bars1 = ax2.bar([i - width/2 for i in x], sdpa_speedups, width,
-                           label='SDPA', color='#e74c3c', alpha=0.8)
-            bars2 = ax2.bar([i + width/2 for i in x], triton_speedups, width,
-                           label='Triton', color='#2ecc71', alpha=0.8)
+            # PyTorch
+            bars_pytorch = None
+            if PYTORCH_AVAILABLE:
+                pytorch_speedups = [results["eager"][s] / results["pytorch"][s]
+                                  if results["eager"].get(s, float('inf')) != float('inf')
+                                  and results["pytorch"].get(s, float('inf')) != float('inf') else 0
+                                  for s in valid_seq_lens]
+                bars_pytorch = ax2.bar([i + offset + bar_idx * width for i in x], pytorch_speedups, width,
+                                      label='PyTorch', color='#9b59b6', alpha=0.8)
+                bar_idx += 1
+
+            # TritonGD_2p
+            bars_gd_2p = None
+            if TRITON_GD_2PASS_AVAILABLE:
+                gd_2p_speedups = [results["eager"][s] / results["triton_gd_2p"][s]
+                                if results["eager"].get(s, float('inf')) != float('inf')
+                                and results["triton_gd_2p"].get(s, float('inf')) != float('inf') else 0
+                                for s in valid_seq_lens]
+                bars_gd_2p = ax2.bar([i + offset + bar_idx * width for i in x], gd_2p_speedups, width,
+                                    label='TritonGD_2p', color='#16a085', alpha=0.8)
+                bar_idx += 1
+
+            # TritonGD_3p
+            bars_gd_3p = None
+            if TRITON_GD_3PASS_AVAILABLE:
+                gd_3p_speedups = [results["eager"][s] / results["triton_gd_3p"][s]
+                                if results["eager"].get(s, float('inf')) != float('inf')
+                                and results["triton_gd_3p"].get(s, float('inf')) != float('inf') else 0
+                                for s in valid_seq_lens]
+                bars_gd_3p = ax2.bar([i + offset + bar_idx * width for i in x], gd_3p_speedups, width,
+                                    label='TritonGD_3p', color='#e67e22', alpha=0.8)
 
             ax2.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='Baseline (1x)')
             ax2.set_ylabel('Speedup over Eager', fontsize=12)
             ax2.set_title('Speedup over Eager Attention', fontsize=14, fontweight='bold')
 
-            # Add value labels
-            for bar in bars1:
-                height = bar.get_height()
-                if height > 0:
-                    ax2.text(bar.get_x() + bar.get_width()/2, height + 0.1,
-                            f'{height:.1f}x', ha='center', fontsize=9)
-            for bar in bars2:
-                height = bar.get_height()
-                if height > 0:
-                    ax2.text(bar.get_x() + bar.get_width()/2, height + 0.1,
-                            f'{height:.1f}x', ha='center', fontsize=9)
-        else:
-            # Direct comparison: Triton vs SDPA
-            ratios = [results["triton"][s] / results["sdpa"][s] for s in valid_seq_lens]
-            bars = ax2.bar(x, ratios, width * 2, label='Triton / SDPA', color='#9b59b6', alpha=0.8)
-            ax2.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='Equal performance')
-            ax2.set_ylabel('Triton / SDPA Time Ratio', fontsize=12)
-            ax2.set_title('Triton vs SDPA Comparison', fontsize=14, fontweight='bold')
+            # Add value labels on top of bars
+            all_bars = [bars_sdpa, bars_triton]
+            if bars_pytorch:
+                all_bars.append(bars_pytorch)
+            if bars_gd_2p:
+                all_bars.append(bars_gd_2p)
+            if bars_gd_3p:
+                all_bars.append(bars_gd_3p)
 
-            for bar in bars:
-                height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width()/2, height + 0.02,
-                        f'{height:.2f}', ha='center', fontsize=9)
+            for bars in all_bars:
+                for bar in bars:
+                    height = bar.get_height()
+                    if height > 0:
+                        ax2.text(bar.get_x() + bar.get_width()/2, height + 0.05,
+                                f'{height:.1f}x', ha='center', fontsize=7, rotation=0)
+        else:
+            # Direct comparison: All vs SDPA
+            width = 0.15
+            bar_data = []
+
+            # Triton vs SDPA
+            triton_ratios = [results["sdpa"][s] / results["triton"][s] for s in valid_seq_lens]
+            bar_data.append(('Triton', triton_ratios, '#2ecc71'))
+
+            if PYTORCH_AVAILABLE:
+                pytorch_ratios = [results["sdpa"][s] / results["pytorch"][s]
+                                if results["pytorch"].get(s, float('inf')) != float('inf') else 0
+                                for s in valid_seq_lens]
+                bar_data.append(('PyTorch', pytorch_ratios, '#9b59b6'))
+
+            if TRITON_GD_2PASS_AVAILABLE:
+                gd_2p_ratios = [results["sdpa"][s] / results["triton_gd_2p"][s]
+                              if results["triton_gd_2p"].get(s, float('inf')) != float('inf') else 0
+                              for s in valid_seq_lens]
+                bar_data.append(('TritonGD_2p', gd_2p_ratios, '#16a085'))
+
+            if TRITON_GD_3PASS_AVAILABLE:
+                gd_3p_ratios = [results["sdpa"][s] / results["triton_gd_3p"][s]
+                              if results["triton_gd_3p"].get(s, float('inf')) != float('inf') else 0
+                              for s in valid_seq_lens]
+                bar_data.append(('TritonGD_3p', gd_3p_ratios, '#e67e22'))
+
+            num_bars = len(bar_data)
+            width = 0.8 / num_bars
+            offset = -0.4 + width / 2
+
+            for idx, (label, ratios, color) in enumerate(bar_data):
+                bars = ax2.bar([i + offset + idx * width for i in x], ratios, width,
+                              label=label, color=color, alpha=0.8)
+                for bar in bars:
+                    height = bar.get_height()
+                    if height > 0:
+                        ax2.text(bar.get_x() + bar.get_width()/2, height + 0.02,
+                                f'{height:.2f}x', ha='center', fontsize=7)
+
+            ax2.axhline(y=1, color='gray', linestyle='--', alpha=0.5, label='SDPA baseline')
+            ax2.set_ylabel('Speedup over SDPA', fontsize=12)
+            ax2.set_title('Speedup over SDPA (Flash Attention)', fontsize=14, fontweight='bold')
 
         ax2.set_xticks(x)
         ax2.set_xticklabels(valid_seq_lens)
         ax2.set_xlabel('Sequence Length', fontsize=12)
-        ax2.legend(loc='upper left', fontsize=11)
+        ax2.legend(loc='upper left', fontsize=9)
         ax2.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()

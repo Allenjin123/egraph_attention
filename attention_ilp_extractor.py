@@ -95,6 +95,40 @@ COST_3PASS = {
 
 DEFAULT_COST = 10  # Default cost for unknown ops
 
+# Cost model favoring 2-pass with M_div_fp avoidance
+# This makes M_div_fp expensive to prefer pure 2-pass without post-loop division
+COST_2PASS_NO_MDIV = {
+    # 3-pass operations = EXPENSIVE
+    'R_max_m': 100,
+    'R_add_m': 100,
+    'M_div_mp': 100,
+    'M_sub_mp': 50,
+    'M_exp_mp': 50,
+    'M_mul_emp': 50,
+
+    # 2-pass operations = CHEAP
+    'R_max_m0': 1,
+    'R_max_m1': 10,
+    'R_add_m0': 1,
+    'R_add_m1': 10,
+    'M_div_fp': 50,        # Make this MORE expensive to avoid problematic variants
+    'M_div_m1m0p': 1,      # Make in-loop division CHEAP (prefer over post-loop)
+    'M_exp_m1m0p': 1,
+    'M_sub_m1m0p': 1,
+    'M_sub_m1p': 1,
+    'M_exp_m1p': 1,
+    'M_mul_m1m0p': 1,
+    'M_mul_m1p': 1,
+    'M_mul_em1m0p': 1,
+    'T_split_m_m1m0': 1,
+    'T_unsplit_m1m0_m': 1,
+
+    # Neutral operations
+    'M_mul_fmp': 1,
+    'R_add_e': 1,
+    'CreateTensor': 0,
+}
+
 
 # ============================================================================
 # E-graph Data Structures
@@ -754,13 +788,33 @@ class SolutionExtractor:
 
                                     r_add_candidates.append((o_nid, child1_op))
 
-                        # Pick two with different grandchildren
+                        # Filter candidates to only use nodes already in ILP-selected set
+                        # This avoids pulling in mixed algorithm variants
+                        selected_node_ids = set(choices.values())
+                        selected_eclasses = set(choices.keys())  # For nested function access
+
+                        # Function to check if node uses only ILP-selected operations
+                        def uses_selected_ops_only(nid, depth=0):
+                            if depth > 3 or nid not in original_nodes:
+                                return True
+                            node = original_nodes[nid]
+                            # Check if this node was selected by ILP
+                            # If not, it might use conflicting operations
+                            for child in node.get('children', []):
+                                if child not in selected_node_ids and not uses_selected_ops_only(child, depth + 1):
+                                    return False
+                            return True
+
+                        # Pick two with different grandchildren, preferring ILP-selected ops
                         output_r_add = None
                         denom_r_add = None
 
                         print(f"    Found {len(r_add_candidates)} R_add_m1 candidates:")
                         for r_nid, gc_op in r_add_candidates:
-                            print(f"      {r_nid}: grandchild_op={gc_op}")
+                            uses_selected = uses_selected_ops_only(r_nid)
+                            status = "ILP-selected" if r_nid in selected_node_ids else "external"
+                            print(f"      {r_nid}: grandchild_op={gc_op} ({status}, uses_selected_ops={uses_selected})")
+
                             if ('mul_fmp' in gc_op.lower() or 'mul_fm' in gc_op.lower()) and not output_r_add:
                                 output_r_add = r_nid
                                 print(f"        → Selected as OUTPUT")
@@ -769,24 +823,60 @@ class SolutionExtractor:
                                 print(f"        → Selected as DENOMINATOR")
 
                         if output_r_add and denom_r_add:
-                            additional_nodes.add(output_r_add)
-                            additional_nodes.add(denom_r_add)
-                            print(f"    ✓ Adding R_add_m1 nodes: output={output_r_add}, denom={denom_r_add}")
+                            # Define 2-pass operations (no 3-pass global ops)
+                            TWOPASS_OPS = {
+                                'M_mul_em1m0p', 'M_sub_m1m0p', 'M_exp_m1m0p',
+                                'M_sub_m1p', 'M_exp_m1p', 'M_mul_m1m0p', 'M_mul_m1p',
+                                'R_max_m0', 'R_max_m1', 'R_add_m0', 'R_add_m1',
+                                'T_split_m_m1m0', 'T_unsplit_m1m0_m', 'M_div_fp',
+                                'M_mul_fmp', 'R_add_e', 'M_mul_emp', 'CreateTensor'
+                            }
 
-                            # Recursively add all dependencies
-                            def add_deps_recursively(nid, depth=0):
-                                if depth > 5 or nid in additional_nodes:  # Prevent infinite recursion
+                            # Recursively add all 2-pass dependencies
+                            def add_2pass_deps(nid, depth=0, is_mdiv_child=False):
+                                if depth > 10 or nid in additional_nodes:
                                     return
-                                if nid in original_nodes:
-                                    additional_nodes.add(nid)
-                                    print(f"      {'  ' * depth}Adding: {nid} ({original_nodes[nid].get('op')})")
-                                    for c in original_nodes[nid].get('children', []):
-                                        add_deps_recursively(c, depth + 1)
+                                if nid not in original_nodes:
+                                    return
 
-                            # Add dependencies for both R_add_m1 nodes
-                            for r_nid in [output_r_add, denom_r_add]:
-                                for gc_nid in original_nodes.get(r_nid, {}).get('children', []):
-                                    add_deps_recursively(gc_nid)
+                                node = original_nodes[nid]
+                                op = node.get('op', '')
+                                node_eclass = node.get('eclass')
+
+                                # Skip 3-pass operations and operations that use them
+                                if op in ['M_div_mp', 'M_sub_mp', 'M_exp_mp', 'R_max_m', 'R_add_m', 'M_div_m1m0p']:
+                                    print(f"      {'  ' * depth}Skipping 3-pass/mixed op: {nid} ({op})")
+                                    return
+
+                                # Check if there's an ILP-selected node with same operation
+                                # Prefer ILP-selected over external nodes UNLESS this is for M_div_fp
+                                # (M_div_fp needs distinct nodes, not same ILP node)
+                                if nid not in selected_node_ids and not is_mdiv_child:
+                                    # This is an external node - check if ILP selected same operation
+                                    for ilp_nid in selected_node_ids:
+                                        ilp_node = original_nodes.get(ilp_nid, {})
+                                        if ilp_node.get('op') == op:
+                                            # Found ILP-selected node with same operation!
+                                            print(f"      {'  ' * depth}Using ILP-selected {op}: {ilp_nid} instead of {nid}")
+                                            add_2pass_deps(ilp_nid, depth, is_mdiv_child)
+                                            return
+
+                                additional_nodes.add(nid)
+                                if depth == 0:
+                                    print(f"    Adding R_add_m1: {nid}")
+                                else:
+                                    # Debug: show if this is ILP-selected
+                                    is_ilp = "ILP" if nid in selected_node_ids else "new"
+                                    print(f"      {'  ' * depth}{nid} ({op}) [{is_ilp}]")
+
+                                # Recursively add children
+                                # Mark as M_div_fp child only for top-level (depth==0)
+                                for c in node.get('children', []):
+                                    add_2pass_deps(c, depth + 1, is_mdiv_child and depth == 0)
+
+                            print(f"    ✓ Recursively adding 2-pass dependencies (keeping M_div_fp children distinct):")
+                            add_2pass_deps(output_r_add, 0, is_mdiv_child=True)
+                            add_2pass_deps(denom_r_add, 0, is_mdiv_child=True)
                         else:
                             print(f"    ✗ Could not find both output and denom: output={output_r_add}, denom={denom_r_add}")
 
@@ -938,6 +1028,41 @@ class SolutionExtractor:
                     "subsumed": False
                 }
 
+        # Post-process: remap children to use nodes that actually exist
+        # This fixes cases where child pointers reference nodes not in extraction
+        print("\n  Post-processing: Remapping children to existing nodes...")
+        remapped_count = 0
+        for node_id, node_data in nodes.items():
+            if 'children' in node_data:
+                new_children = []
+                for child_id in node_data['children']:
+                    if child_id in nodes:
+                        # Child exists, keep it
+                        new_children.append(child_id)
+                    else:
+                        # Child missing - find alternative with same operation
+                        if child_id in original_nodes:
+                            missing_op = original_nodes[child_id].get('op', '')
+                            # Find a node with same operation that exists in extraction
+                            found = False
+                            for alt_id, alt_data in nodes.items():
+                                if alt_data.get('op') == missing_op and alt_id != child_id:
+                                    print(f"    Remapping {node_id}.child: {child_id}({missing_op}) → {alt_id}")
+                                    new_children.append(alt_id)
+                                    remapped_count += 1
+                                    found = True
+                                    break
+                            if not found:
+                                # Keep original (will cause error, but shows the issue)
+                                new_children.append(child_id)
+                        else:
+                            new_children.append(child_id)
+
+                node_data['children'] = new_children
+
+        if remapped_count > 0:
+            print(f"  Remapped {remapped_count} child pointers")
+
         # Filter class_data to only include selected eclasses
         class_data = {}
         original_class_data = original_data.get('class_data', {})
@@ -1027,7 +1152,7 @@ def main():
     )
     parser.add_argument(
         "--cost-model", "-c",
-        choices=['2pass', '3pass', 'original'],
+        choices=['2pass', '3pass', '2pass-no-mdiv', 'original'],
         default='2pass',
         help="Cost model to use (default: 2pass)"
     )
@@ -1081,6 +1206,8 @@ def main():
         cost_model = COST_2PASS
     elif args.cost_model == '3pass':
         cost_model = COST_3PASS
+    elif args.cost_model == '2pass-no-mdiv':
+        cost_model = COST_2PASS_NO_MDIV
     else:
         cost_model = {}  # Use original costs
 
