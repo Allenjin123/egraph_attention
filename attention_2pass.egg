@@ -11,6 +11,7 @@
   (M_div_m1m0p Tensor Tensor)
   (M_mul_fm1m0p Tensor Tensor)
   (M_mul_fmp Tensor Tensor)
+  (M_div_fp Tensor Tensor)           ; NEW: [f,p] / [p] -> [f,p]
   ; Reduce operations (no map)
   (R_add_e Tensor)
   (R_max_m0 Tensor)
@@ -43,7 +44,8 @@
 ; Pass 1: Tile K only, compute local statistics per tile,
 ;         build global max from local maxes
 ; Pass 2: Use global max to correct local statistics,
-;         untile A, then compute output with V
+;         compute output with V, accumulate weighted V
+; Post-loop: Normalize accumulated output by global sum
 ; ============================================
 
 ; ===== Pass 1: Tile K only and compute local statistics =====
@@ -92,14 +94,20 @@
 ; Compute GLOBAL denominator: GD_p = sum_{m1}(CD_{m1,p})
 (let GD (R_add_m1 CD))
 
-; Normalize: A_{m1,m0,p} = CN_{m1,m0,p} / GD_p
-(let A_tiled (M_div_m1m0p CN GD))
+; ===== KEY FIX: Multiply V with UNNORMALIZED attention =====
+; Untile corrected (but NOT normalized) attention
+; A_unnorm_{m,p} = unsplit_m1m0_into_m(CN_{m1,m0,p})
+(let A_unnorm (T_unsplit_m1m0_m CN))
 
-; Untile A: A_{m,p} = unsplit_m1m0_into_m(A_{m1,m0,p})
-(let A (T_unsplit_m1m0_m A_tiled))
+; Multiply by V and accumulate (in same pass 2 loop as GD!)
+; AV_temp_{f,m,p} = A_unnorm_{m,p} * V_{f,m}
+(let AV_temp (M_mul_fmp A_unnorm V))
+; AV_acc_{f,p} = sum_m(AV_temp_{f,m,p})
+(let AV_acc (R_add_m AV_temp))
 
-; Multiply by V: AV_{f,p} = A_{m,p} * V_{f,m}
-(let AV_temp (M_mul_fmp A V))
-(let AV (R_add_m AV_temp))
+; ===== Post-loop: Final normalization =====
+; AV_{f,p} = AV_acc_{f,p} / GD_p
+; This happens AFTER pass 2 loop - no K/V reload needed!
+(let AV (M_div_fp AV_acc GD))
 
 (extract AV)

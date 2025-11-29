@@ -39,6 +39,25 @@ except ImportError:
     HYBRID_3PASS_AVAILABLE = False
     print("Warning: generated_hybrid_3pass.py not found")
 
+# Import pure PyTorch graph-driven implementation
+try:
+    from generated_pytorch_2pass import egg_attention_graphdriven
+    PYTORCH_GRAPHDRIVEN_AVAILABLE = True
+    # Create compiled version
+    pytorch_graphdriven_compiled = torch.compile(egg_attention_graphdriven, mode="max-autotune")
+except ImportError:
+    PYTORCH_GRAPHDRIVEN_AVAILABLE = False
+    pytorch_graphdriven_compiled = None
+    print("Warning: generated_pytorch_2pass.py not found")
+
+# Import Triton graph-driven implementation
+try:
+    from generated_triton_graphdriven import egg_attention_graphdriven_triton
+    TRITON_GRAPHDRIVEN_AVAILABLE = True
+except ImportError:
+    TRITON_GRAPHDRIVEN_AVAILABLE = False
+    print("Warning: generated_triton_graphdriven.py not found")
+
 
 # ============================================================================
 # Attention Implementations
@@ -119,6 +138,43 @@ def hybrid_2pass(Q, K, V, scale, causal=True):
     return egg_attention_hybrid_2pass(Q, K, V, scale=scale)
 
 
+def pytorch_graphdriven(Q, K, V, scale, causal=True):
+    """
+    Pure PyTorch graph-driven attention (generated from egglog computation graph)
+    - Uses standard PyTorch ops with dimension-aware broadcasting
+    - GPU accelerated when tensors are on CUDA
+    """
+    if not PYTORCH_GRAPHDRIVEN_AVAILABLE:
+        raise RuntimeError("generated_pytorch_2pass.py not found")
+    # Note: doesn't support causal masking yet
+    return egg_attention_graphdriven(Q, K, V, scale=scale)
+
+
+def pytorch_compiled(Q, K, V, scale, causal=True):
+    """
+    torch.compile'd version of PyTorch graph-driven attention
+    - Uses max-autotune mode for kernel fusion and optimization
+    - First call triggers compilation (slow), subsequent calls are fast
+    """
+    if not PYTORCH_GRAPHDRIVEN_AVAILABLE or pytorch_graphdriven_compiled is None:
+        raise RuntimeError("generated_pytorch_2pass.py not found or compilation failed")
+    # Note: doesn't support causal masking yet
+    return pytorch_graphdriven_compiled(Q, K, V, scale=scale)
+
+
+def triton_graphdriven(Q, K, V, scale, causal=True):
+    """
+    Triton graph-driven attention (generated from egglog computation graph)
+    - Kernel structure emerges from graph dependencies
+    - No fixed templates for 2-pass or 3-pass
+    - Automatically adapts to any attention algorithm
+    """
+    if not TRITON_GRAPHDRIVEN_AVAILABLE:
+        raise RuntimeError("generated_triton_graphdriven.py not found")
+    # Note: doesn't support causal masking yet
+    return egg_attention_graphdriven_triton(Q, K, V, scale=scale, causal=causal)
+
+
 # ============================================================================
 # Verification
 # ============================================================================
@@ -139,12 +195,18 @@ def verify_correctness(Q, K, V, scale, tolerance=0.01):
         out_truly_naive = triton_truly_naive(Q, K, V, scale, causal=False)
         out_hybrid_3pass = hybrid_3pass(Q, K, V, scale, causal=False) if HYBRID_3PASS_AVAILABLE else None
         out_hybrid_2pass = hybrid_2pass(Q, K, V, scale, causal=False) if HYBRID_2PASS_AVAILABLE else None
+        out_pytorch_gd = pytorch_graphdriven(Q, K, V, scale, causal=False) if PYTORCH_GRAPHDRIVEN_AVAILABLE else None
+        out_pytorch_compiled = pytorch_compiled(Q, K, V, scale, causal=False) if PYTORCH_GRAPHDRIVEN_AVAILABLE else None
+        out_triton_gd = triton_graphdriven(Q, K, V, scale, causal=False) if TRITON_GRAPHDRIVEN_AVAILABLE else None
 
     diff_sdpa = (out_eager - out_sdpa).abs().max().item()
     diff_triton = (out_eager - out_triton).abs().max().item()
     diff_truly_naive = (out_eager - out_truly_naive).abs().max().item()
     diff_hybrid_3pass = (out_eager - out_hybrid_3pass).abs().max().item() if out_hybrid_3pass is not None else float('inf')
     diff_hybrid_2pass = (out_eager - out_hybrid_2pass).abs().max().item() if out_hybrid_2pass is not None else float('inf')
+    diff_pytorch_gd = (out_eager - out_pytorch_gd).abs().max().item() if out_pytorch_gd is not None else float('inf')
+    diff_pytorch_compiled = (out_eager - out_pytorch_compiled).abs().max().item() if out_pytorch_compiled is not None else float('inf')
+    diff_triton_gd = (out_eager - out_triton_gd).abs().max().item() if out_triton_gd is not None else float('inf')
 
     print(f"  Max diff eager vs SDPA:           {diff_sdpa:.6f}")
     print(f"  Max diff eager vs Triton:         {diff_triton:.6f}")
@@ -153,6 +215,11 @@ def verify_correctness(Q, K, V, scale, tolerance=0.01):
         print(f"  Max diff eager vs Hybrid 3-pass:  {diff_hybrid_3pass:.6f}")
     if HYBRID_2PASS_AVAILABLE:
         print(f"  Max diff eager vs Hybrid 2-pass:  {diff_hybrid_2pass:.6f}")
+    if PYTORCH_GRAPHDRIVEN_AVAILABLE:
+        print(f"  Max diff eager vs PyTorch GD:     {diff_pytorch_gd:.6f}")
+        print(f"  Max diff eager vs PyTorch Compile:{diff_pytorch_compiled:.6f}")
+    if TRITON_GRAPHDRIVEN_AVAILABLE:
+        print(f"  Max diff eager vs Triton GD:      {diff_triton_gd:.6f}")
 
     passed = (diff_sdpa < tolerance and diff_triton < tolerance and
               diff_truly_naive < tolerance)
@@ -160,6 +227,10 @@ def verify_correctness(Q, K, V, scale, tolerance=0.01):
         passed = passed and diff_hybrid_3pass < tolerance
     if HYBRID_2PASS_AVAILABLE:
         passed = passed and diff_hybrid_2pass < tolerance
+    if PYTORCH_GRAPHDRIVEN_AVAILABLE:
+        passed = passed and diff_pytorch_gd < tolerance and diff_pytorch_compiled < tolerance
+    if TRITON_GRAPHDRIVEN_AVAILABLE:
+        passed = passed and diff_triton_gd < tolerance
     return passed
 
 
@@ -271,6 +342,9 @@ def main():
         "truly_naive": {},
         "hybrid_3pass": {},
         "hybrid_2pass": {},
+        "pytorch_gd": {},
+        "pytorch_compiled": {},
+        "triton_gd": {},
     }
 
     for seq_len in seq_lengths:
@@ -365,17 +439,62 @@ def main():
         else:
             results["hybrid_2pass"][seq_len] = float('inf')
 
+        # PyTorch graph-driven (non-causal)
+        if PYTORCH_GRAPHDRIVEN_AVAILABLE:
+            try:
+                pytorch_gd_time = benchmark_kernel(
+                    pytorch_graphdriven, Q, K, V, scale, False,  # non-causal
+                    warmup=args.warmup, iters=args.iters
+                )
+                results["pytorch_gd"][seq_len] = pytorch_gd_time
+                print(f"  PyTorch GD:           {pytorch_gd_time:.3f} ms")
+            except Exception as e:
+                print(f"  PyTorch GD:           FAILED ({e})")
+                results["pytorch_gd"][seq_len] = float('inf')
+        else:
+            results["pytorch_gd"][seq_len] = float('inf')
+
+        # PyTorch compiled (non-causal)
+        if PYTORCH_GRAPHDRIVEN_AVAILABLE:
+            try:
+                pytorch_compiled_time = benchmark_kernel(
+                    pytorch_compiled, Q, K, V, scale, False,  # non-causal
+                    warmup=args.warmup, iters=args.iters
+                )
+                results["pytorch_compiled"][seq_len] = pytorch_compiled_time
+                print(f"  PyTorch Compiled:     {pytorch_compiled_time:.3f} ms")
+            except Exception as e:
+                print(f"  PyTorch Compiled:     FAILED ({e})")
+                results["pytorch_compiled"][seq_len] = float('inf')
+        else:
+            results["pytorch_compiled"][seq_len] = float('inf')
+
+        # Triton graph-driven (non-causal)
+        if TRITON_GRAPHDRIVEN_AVAILABLE:
+            try:
+                triton_gd_time = benchmark_kernel(
+                    triton_graphdriven, Q, K, V, scale, False,  # non-causal
+                    warmup=args.warmup, iters=args.iters
+                )
+                results["triton_gd"][seq_len] = triton_gd_time
+                print(f"  Triton Graph-Driven:  {triton_gd_time:.3f} ms")
+            except Exception as e:
+                print(f"  Triton Graph-Driven:  FAILED ({e})")
+                results["triton_gd"][seq_len] = float('inf')
+        else:
+            results["triton_gd"][seq_len] = float('inf')
+
         # Clear cache between sequence lengths
         torch.cuda.empty_cache()
 
     # Print summary table
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 120)
     print("BENCHMARK SUMMARY")
-    print("=" * 90)
+    print("=" * 120)
 
-    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12} {'Hybrid3P':<10} {'Hybrid2P':<10}"
+    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12} {'Hybrid3P':<10} {'Hybrid2P':<10} {'PyTorchGD':<12} {'Compiled':<10} {'TritonGD':<10}"
     print(header)
-    print("-" * 72)
+    print("-" * 106)
 
     for seq_len in seq_lengths:
         eager_t = results["eager"].get(seq_len, float('inf'))
@@ -384,6 +503,9 @@ def main():
         truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
         hybrid_3pass_t = results["hybrid_3pass"].get(seq_len, float('inf'))
         hybrid_2pass_t = results["hybrid_2pass"].get(seq_len, float('inf'))
+        pytorch_gd_t = results["pytorch_gd"].get(seq_len, float('inf'))
+        pytorch_compiled_t = results["pytorch_compiled"].get(seq_len, float('inf'))
+        triton_gd_t = results["triton_gd"].get(seq_len, float('inf'))
 
         row = f"{seq_len:<10} "
         row += f"{eager_t:<10.2f} " if eager_t != float('inf') else f"{'SKIP':<10} "
@@ -391,7 +513,10 @@ def main():
         row += f"{triton_t:<10.2f} " if triton_t != float('inf') else f"{'FAIL':<10} "
         row += f"{truly_naive_t:<12.2f} " if truly_naive_t != float('inf') else f"{'FAIL':<12} "
         row += f"{hybrid_3pass_t:<10.2f} " if hybrid_3pass_t != float('inf') else f"{'N/A':<10} "
-        row += f"{hybrid_2pass_t:<10.2f}" if hybrid_2pass_t != float('inf') else f"{'N/A':<10}"
+        row += f"{hybrid_2pass_t:<10.2f} " if hybrid_2pass_t != float('inf') else f"{'N/A':<10} "
+        row += f"{pytorch_gd_t:<12.2f} " if pytorch_gd_t != float('inf') else f"{'N/A':<12} "
+        row += f"{pytorch_compiled_t:<10.2f} " if pytorch_compiled_t != float('inf') else f"{'N/A':<10} "
+        row += f"{triton_gd_t:<10.2f}" if triton_gd_t != float('inf') else f"{'N/A':<10}"
 
         print(row)
 
@@ -430,6 +555,20 @@ def main():
         if HYBRID_2PASS_AVAILABLE:
             ax1.plot(valid_seq_lens, [results["hybrid_2pass"][s] for s in valid_seq_lens],
                     marker='*', linewidth=2, markersize=10, label='Hybrid 2-pass', color='#1abc9c')
+        if PYTORCH_GRAPHDRIVEN_AVAILABLE:
+            pytorch_gd_times = [results["pytorch_gd"].get(s, float('inf')) for s in valid_seq_lens]
+            if not all(t == float('inf') for t in pytorch_gd_times):
+                ax1.plot(valid_seq_lens, pytorch_gd_times,
+                        marker='p', linewidth=2, markersize=8, label='PyTorch GD', color='#e67e22')
+            pytorch_compiled_times = [results["pytorch_compiled"].get(s, float('inf')) for s in valid_seq_lens]
+            if not all(t == float('inf') for t in pytorch_compiled_times):
+                ax1.plot(valid_seq_lens, pytorch_compiled_times,
+                        marker='h', linewidth=2, markersize=8, label='PyTorch Compiled', color='#8e44ad')
+        if TRITON_GRAPHDRIVEN_AVAILABLE:
+            triton_gd_times = [results["triton_gd"].get(s, float('inf')) for s in valid_seq_lens]
+            if not all(t == float('inf') for t in triton_gd_times):
+                ax1.plot(valid_seq_lens, triton_gd_times,
+                        marker='D', linewidth=2, markersize=8, label='Triton GD', color='#16a085')
 
     ax1.set_xlabel('Sequence Length', fontsize=12)
     ax1.set_ylabel('Time (ms)', fontsize=12)
@@ -502,15 +641,19 @@ def main():
     # Save CSV
     csv_path = os.path.join(results_dir, f'kernel_benchmark_h{num_heads}_d{head_dim}.csv')
     with open(csv_path, 'w') as f:
-        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Hybrid_3pass_ms,Hybrid_2pass_ms\n")
+        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Hybrid_3pass_ms,Hybrid_2pass_ms,PyTorch_GD_ms,PyTorch_Compiled_ms,Triton_GD_ms\n")
         for seq_len in valid_seq_lens:
             eager_t = results["eager"].get(seq_len, float('inf'))
             truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
             hybrid_3pass_t = results["hybrid_3pass"].get(seq_len, float('inf'))
             hybrid_2pass_t = results["hybrid_2pass"].get(seq_len, float('inf'))
+            pytorch_gd_t = results["pytorch_gd"].get(seq_len, float('inf'))
+            pytorch_compiled_t = results["pytorch_compiled"].get(seq_len, float('inf'))
+            triton_gd_t = results["triton_gd"].get(seq_len, float('inf'))
             f.write(f"{seq_len},{eager_t:.3f},{results['sdpa'][seq_len]:.3f},"
                     f"{results['triton'][seq_len]:.3f},{truly_naive_t:.3f},"
-                    f"{hybrid_3pass_t:.3f},{hybrid_2pass_t:.3f}\n")
+                    f"{hybrid_3pass_t:.3f},{hybrid_2pass_t:.3f},"
+                    f"{pytorch_gd_t:.3f},{pytorch_compiled_t:.3f},{triton_gd_t:.3f}\n")
     print(f"Results saved to: {csv_path}")
 
 

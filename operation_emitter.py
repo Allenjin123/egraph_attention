@@ -18,6 +18,7 @@ from egg_parser import ComputationGraph, IRNode
 from egg_ops import OP_REGISTRY, DimSpec, get_op_spec
 from algorithm_detector import AlgorithmDetector, AlgorithmInfo, AlgorithmType
 from kernel_scaffolds import KernelScaffold, ThreePassScaffold, TwoPassScaffold
+from pass_analyzer import PassAnalyzer
 
 
 @dataclass
@@ -99,6 +100,10 @@ class OperationEmitter:
             return self._emit_map_op(node, spec)
         elif spec.op_type == 'reduce':
             return self._emit_reduce_op(node, spec)
+        elif spec.op_type == 'tile':
+            return self._emit_tile_op(node, spec)
+        elif spec.op_type == 'create':
+            return []  # Skip CreateTensor nodes
         else:
             return [f"# Unsupported op type: {spec.op_type}"]
 
@@ -226,6 +231,37 @@ class OperationEmitter:
         except ValueError:
             return 0  # Default to first axis
 
+    def _emit_tile_op(self, node: IRNode, spec) -> List[str]:
+        """
+        Emit code for tile operations.
+
+        In Triton, tiling is implicit through the loop structure.
+        We iterate over K/V blocks (tiles), so split/unsplit are no-ops.
+        However, we track them for variable dependencies.
+        """
+        lines = []
+        result_var = self._get_triton_var_name(node)
+
+        if node.op == 'T_split_m_m1m0':
+            # Splitting K into tiles - handled by loop iteration
+            # Just reference the child variable
+            if node.children:
+                child_var = self._get_child_var(node.children[0])
+                lines.append(f"# Tiling: K blocks loaded per iteration")
+                # Register the variable as reference to the input
+                self.var_map[node.id] = TritonVar(child_var, self._dims_to_shape(node.output_dims))
+        elif node.op == 'T_unsplit_m1m0_m':
+            # Merging tiles back - this is the accumulated result
+            if node.children:
+                child_var = self._get_child_var(node.children[0])
+                lines.append(f"# Untiling: accumulated across all tiles")
+                # The unsplit result should reference the accumulator
+                self.var_map[node.id] = TritonVar(child_var, self._dims_to_shape(node.output_dims))
+        else:
+            lines.append(f"# Tile operation: {node.op}")
+
+        return lines
+
 
 class HoleEmitter:
     """
@@ -243,47 +279,197 @@ class HoleEmitter:
         self.op_emitter = OperationEmitter(graph, self.info)
 
     def fill_all_holes(self):
-        """Analyze graph and fill all scaffold holes."""
-        if self.info.algorithm == AlgorithmType.THREE_PASS:
-            self._fill_3pass_holes()
-        elif self.info.algorithm == AlgorithmType.TWO_PASS:
-            self._fill_2pass_holes()
+        """
+        Analyze graph and fill scaffold holes with actual operations.
 
-    def _fill_3pass_holes(self):
-        """Fill holes for 3-pass scaffold."""
-        passes = self.detector.get_pass_structure()
+        Now uses PassAnalyzer to automatically determine pass structure
+        and generates Triton code directly from the computation graph.
+        """
+        # Use PassAnalyzer to get automatic pass structure
+        analyzer = PassAnalyzer(self.graph)
+        passes = analyzer.analyze()
+        pass_info_list = analyzer.get_pass_info()
 
-        # The standard 3-pass scaffold already has the core operations
-        # The holes are for customization/extension
+        # Generate operations for each pass
+        for pass_info in pass_info_list:
+            pass_num = pass_info.pass_num
+            operations = pass_info.operations
 
-        # For now, we leave most holes empty (using scaffold defaults)
-        # This can be extended to insert custom operations from the graph
+            # Collect code lines for this pass
+            pass_code = []
+            pass_code.append(f"# Pass {pass_num}: {len(operations)} operations")
 
-        self.scaffold.fill_hole("init", [
-            "# Graph-derived initialization",
-        ])
+            # Generate code for each operation
+            for node_id in operations:
+                if node_id in self.graph.nodes:
+                    node = self.graph.nodes[node_id]
 
-        self.scaffold.fill_hole("pass1_qk", [
-            "# QK computation handled by scaffold",
-        ])
+                    # Skip primitives and inputs
+                    if node.is_primitive() or node.op == 'CreateTensor':
+                        continue
 
-    def _fill_2pass_holes(self):
-        """Fill holes for 2-pass scaffold."""
-        passes = self.detector.get_pass_structure()
+                    # Emit operation
+                    op_code = self.op_emitter.emit_operation(node)
+                    pass_code.extend(op_code)
 
-        # Similar to 3-pass, the scaffold has the core structure
-        self.scaffold.fill_hole("pass1_local_max", [
-            "# Local max computed by scaffold",
-        ])
+                    # Mark global reductions
+                    if analyzer.is_global_reduction(node_id):
+                        pass_code.append(f"# ^ Global reduction - ends pass {pass_num}")
 
-        self.scaffold.fill_hole("pass2_correction", [
-            "# Correction factor: exp(local_max - global_max)",
-        ])
+            # Fill appropriate hole based on pass number
+            hole_name = f"pass{pass_num + 1}_operations"  # +1 for 1-indexed
+            self.scaffold.fill_hole(hole_name, pass_code)
 
     def generate_kernel(self) -> str:
         """Generate the complete kernel with filled holes."""
         self.fill_all_holes()
         return self.scaffold.generate()
+
+    def generate_kernel_from_graph(self) -> str:
+        """
+        Generate complete Triton kernel directly from computation graph.
+
+        No fixed templates - the kernel structure emerges from the graph.
+        """
+        analyzer = PassAnalyzer(self.graph)
+        passes = analyzer.analyze()
+        mem_info = analyzer.get_memory_pass_info()
+
+        lines = []
+        lines.append("@triton.jit")
+        lines.append("def attention_kernel(")
+        lines.append("    Q, K, V, Out,")
+        lines.append("    stride_qb, stride_qh, stride_qm, stride_qk,")
+        lines.append("    stride_kb, stride_kh, stride_kn, stride_kk,")
+        lines.append("    stride_vb, stride_vh, stride_vn, stride_vk,")
+        lines.append("    stride_ob, stride_oh, stride_om, stride_ok,")
+        lines.append("    N, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,")
+        lines.append("):")
+        lines.append("    # Graph-driven kernel generation")
+        lines.append(f"    # Memory passes: {mem_info.num_memory_passes}")
+        lines.append(f"    # Sync levels: {mem_info.sync_levels}")
+        lines.append("")
+        lines.append("    # Get block indices")
+        lines.append("    pid_m = tl.program_id(0)")
+        lines.append("    pid_b = tl.program_id(1)")
+        lines.append("    pid_h = tl.program_id(2)")
+        lines.append("")
+        lines.append("    # Compute offsets for Q (this block of queries)")
+        lines.append("    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)")
+        lines.append("    offs_k = tl.arange(0, BLOCK_K)")
+        lines.append("    Q_ptr = Q + pid_b * stride_qb + pid_h * stride_qh")
+        lines.append("    q = tl.load(Q_ptr + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)")
+        lines.append("")
+
+        # Initialize accumulators based on what global reductions we have
+        lines.append("    # Initialize accumulators for global reductions")
+        for pass_num in sorted(passes.keys()):
+            for node_id in passes[pass_num]:
+                if analyzer.is_global_reduction(node_id):
+                    node = self.graph.nodes[node_id]
+                    if 'max' in node.op.lower():
+                        lines.append("    global_max = tl.full([BLOCK_M], value=-float('inf'), dtype=tl.float32)")
+                    elif 'add' in node.op.lower() or 'sum' in node.op.lower():
+                        lines.append("    global_sum = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)")
+                        lines.append("    acc = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)")
+        lines.append("")
+
+        # Generate K/V loops for each memory pass
+        for pass_idx in range(mem_info.num_memory_passes):
+            lines.append(f"    # Memory Pass {pass_idx}: Iterate over all K/V blocks")
+            lines.append("    NUM_TILES = tl.cdiv(N, BLOCK_N)")
+            lines.append("    for tile_idx in range(NUM_TILES):")
+            lines.append("        # Load K block")
+            lines.append("        offs_n = tile_idx * BLOCK_N + tl.arange(0, BLOCK_N)")
+            lines.append("        K_ptr = K + pid_b * stride_kb + pid_h * stride_kh")
+            lines.append("        k = tl.load(K_ptr + offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)")
+
+            # Check if this pass needs V loading
+            pass_info_list = analyzer.get_pass_info()
+            needs_v = any(info.needs_v_load for info in pass_info_list if info.pass_num == pass_idx)
+            if needs_v:
+                lines.append("")
+                lines.append("        # Load V block")
+                lines.append("        V_ptr = V + pid_b * stride_vb + pid_h * stride_vh")
+                lines.append("        v = tl.load(V_ptr + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk)")
+            lines.append("")
+
+            # Generate operations for this pass
+            if pass_idx in passes:
+                lines.append(f"        # Operations for sync level {pass_idx}")
+
+                # Detect and optimize QK computation pattern
+                qk_computed = self._try_emit_qk_pattern(passes[pass_idx], lines, analyzer)
+
+                for node_id in passes[pass_idx]:
+                    if node_id in self.graph.nodes:
+                        node = self.graph.nodes[node_id]
+                        if node.is_primitive() or node.op == 'CreateTensor':
+                            continue
+
+                        # Skip if already handled by pattern detection
+                        if qk_computed and node.op in ('M_mul_em1m0p', 'M_mul_emp', 'R_add_e'):
+                            continue
+
+                        op_code = self.op_emitter.emit_operation(node)
+                        for code_line in op_code:
+                            lines.append(f"        {code_line}")
+
+                        if analyzer.is_global_reduction(node_id):
+                            lines.append(f"        # ^ Global reduction")
+            lines.append("")
+
+        # Post-loop operations
+        if mem_info.post_loop_ops:
+            lines.append("    # Post-loop operations (don't need K/V access)")
+            for node_id in mem_info.post_loop_ops:
+                if node_id in self.graph.nodes:
+                    node = self.graph.nodes[node_id]
+                    op_code = self.op_emitter.emit_operation(node)
+                    for code_line in op_code:
+                        lines.append(f"    {code_line}")
+            lines.append("")
+
+        # Store output
+        lines.append("    # Store output")
+        lines.append("    Out_ptr = Out + pid_b * stride_ob + pid_h * stride_oh")
+        lines.append("    tl.store(Out_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok, acc)")
+
+        return "\n".join(lines)
+
+    def _try_emit_qk_pattern(self, node_ids: List[str], lines: List[str], analyzer: PassAnalyzer) -> bool:
+        """
+        Try to detect and emit optimized QK computation pattern.
+
+        Pattern: M_mul_emp/M_mul_em1m0p (Q*K) followed by R_add_e (sum over embedding)
+        Optimized to: qk = tl.dot(q, tl.trans(k))
+
+        Returns True if pattern was detected and emitted.
+        """
+        # Look for M_mul followed by R_add_e pattern
+        mul_node = None
+        add_node = None
+
+        for node_id in node_ids:
+            if node_id in self.graph.nodes:
+                node = self.graph.nodes[node_id]
+                if node.op in ('M_mul_emp', 'M_mul_em1m0p'):
+                    mul_node = node
+                elif node.op == 'R_add_e' and mul_node:
+                    # Check if R_add_e depends on the multiply
+                    if mul_node.id in node.children:
+                        add_node = node
+
+        if mul_node and add_node:
+            # Emit optimized QK computation
+            lines.append("        # QK = Q @ K^T (optimized)")
+            lines.append("        qk = tl.dot(q, tl.trans(k))  # [BLOCK_M, BLOCK_N]")
+
+            # Register the variable
+            self.op_emitter.var_map[add_node.id] = TritonVar('qk', '[BLOCK_M, BLOCK_N]')
+            return True
+
+        return False
 
 
 # ============================================================================

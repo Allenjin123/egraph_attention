@@ -136,23 +136,23 @@
       "cost": 1.0,
       "subsumed": false
     },
-    "function-0-M_div_m1m0p": {
-      "op": "M_div_m1m0p",
-      "children": [
-        "function-0-M_mul_m1m0p",
-        "function-0-R_add_m1"
-      ],
-      "eclass": "Tensor-16",
-      "cost": 1.0,
-      "subsumed": false
-    },
     "function-0-M_mul_fmp": {
       "op": "M_mul_fmp",
       "children": [
         "function-0-T_unsplit_m1m0_m",
         "function-2-CreateTensor"
       ],
-      "eclass": "Tensor-18",
+      "eclass": "Tensor-17",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_div_fp": {
+      "op": "M_div_fp",
+      "children": [
+        "function-0-R_add_m",
+        "function-0-R_add_m1"
+      ],
+      "eclass": "Tensor-19",
       "cost": 1.0,
       "subsumed": false
     },
@@ -206,7 +206,7 @@
       "children": [
         "function-0-M_mul_fmp"
       ],
-      "eclass": "Tensor-19",
+      "eclass": "Tensor-18",
       "cost": 1.0,
       "subsumed": false
     },
@@ -230,9 +230,9 @@
     "function-0-T_unsplit_m1m0_m": {
       "op": "T_unsplit_m1m0_m",
       "children": [
-        "function-0-M_div_m1m0p"
+        "function-0-M_mul_m1m0p"
       ],
-      "eclass": "Tensor-17",
+      "eclass": "Tensor-16",
       "cost": 1.0,
       "subsumed": false
     }
@@ -240,7 +240,8 @@
   "root_eclasses": [],
   "class_data": {
     "Tensor-0": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "Q"
     },
     "i64-64": {
       "type": "i64"
@@ -252,67 +253,86 @@
       "type": "String"
     },
     "Tensor-1": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "K"
     },
     "String-1": {
       "type": "String"
     },
     "Tensor-2": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "V"
     },
     "String-2": {
       "type": "String"
     },
     "Tensor-4": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "BQK_temp"
     },
     "Tensor-3": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "BK"
     },
     "Tensor-8": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "BQK_shifted"
     },
     "Tensor-5": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "BQK"
     },
     "Tensor-6": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "LM"
     },
     "Tensor-9": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "SLN"
     },
     "Tensor-11": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "LM_GM_diff"
     },
     "Tensor-7": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "GM"
     },
     "Tensor-12": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "PRM"
     },
     "Tensor-13": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "CN"
     },
     "Tensor-14": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "CD"
     },
     "Tensor-10": {
-      "type": "Tensor"
-    },
-    "Tensor-16": {
-      "type": "Tensor"
-    },
-    "Tensor-15": {
-      "type": "Tensor"
-    },
-    "Tensor-18": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "SLD"
     },
     "Tensor-17": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "AV_temp"
+    },
+    "Tensor-16": {
+      "type": "Tensor",
+      "let": "A_unnorm"
     },
     "Tensor-19": {
-      "type": "Tensor"
+      "type": "Tensor",
+      "let": "AV"
+    },
+    "Tensor-18": {
+      "type": "Tensor",
+      "let": "AV_acc"
+    },
+    "Tensor-15": {
+      "type": "Tensor",
+      "let": "GD"
     },
     "i64-4": {
       "type": "i64"

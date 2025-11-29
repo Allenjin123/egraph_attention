@@ -23,6 +23,7 @@ from typing import Set, List, Optional, Dict
 from enum import Enum
 
 from egg_parser import ComputationGraph, IRNode
+from pass_analyzer import PassAnalyzer
 
 
 class AlgorithmType(Enum):
@@ -175,69 +176,14 @@ class AlgorithmDetector:
         """
         Analyze graph to determine which operations belong to which pass.
 
+        Now uses PassAnalyzer to automatically infer pass structure from
+        computation graph dependencies instead of hardcoded patterns.
+
         Returns:
-            Dict mapping pass number to list of operation node IDs
+            Dict mapping pass number (0-indexed) to list of operation node IDs
         """
-        info = self.detect()
-
-        if info.algorithm == AlgorithmType.THREE_PASS:
-            return self._get_3pass_structure()
-        elif info.algorithm == AlgorithmType.TWO_PASS:
-            return self._get_2pass_structure()
-        else:
-            return {}
-
-    def _get_3pass_structure(self) -> Dict[int, List[str]]:
-        """Get pass structure for 3-pass attention."""
-        passes = {1: [], 2: [], 3: []}
-
-        for node_id in self.graph.execution_order:
-            node = self.graph.nodes.get(node_id)
-            if not node or node.is_primitive() or node.op == 'CreateTensor':
-                continue
-
-            op = node.op
-
-            # Pass 1: Compute QK, find max
-            if op in ('M_mul_emp', 'R_add_e', 'R_max_m'):
-                passes[1].append(node_id)
-            # Pass 2: Compute exp, sum
-            elif op in ('M_sub_mp', 'M_exp_mp', 'R_add_m'):
-                passes[2].append(node_id)
-            # Pass 3: Normalize, compute output
-            elif op in ('M_div_mp', 'M_mul_fmp'):
-                passes[3].append(node_id)
-
-        return passes
-
-    def _get_2pass_structure(self) -> Dict[int, List[str]]:
-        """Get pass structure for 2-pass attention."""
-        passes = {1: [], 2: []}
-
-        # Pass 1: Compute QK tiles, find local max, compute global max
-        pass1_ops = {
-            'T_split_m_m1m0', 'M_mul_em1m0p', 'R_add_e',
-            'R_max_m0', 'R_max_m1'
-        }
-
-        # Pass 2: Apply correction, compute output
-        pass2_ops = {
-            'M_sub_m1m0p', 'M_exp_m1m0p', 'M_sub_m1p', 'M_exp_m1p',
-            'M_mul_m1m0p', 'R_add_m0', 'M_mul_m1p', 'R_add_m1',
-            'M_div_m1m0p', 'T_unsplit_m1m0_m', 'M_mul_fmp', 'R_add_m'
-        }
-
-        for node_id in self.graph.execution_order:
-            node = self.graph.nodes.get(node_id)
-            if not node or node.is_primitive() or node.op == 'CreateTensor':
-                continue
-
-            if node.op in pass1_ops:
-                passes[1].append(node_id)
-            elif node.op in pass2_ops:
-                passes[2].append(node_id)
-
-        return passes
+        analyzer = PassAnalyzer(self.graph)
+        return analyzer.analyze()
 
 
 def detect_algorithm(graph: ComputationGraph) -> AlgorithmInfo:

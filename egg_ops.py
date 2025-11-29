@@ -160,6 +160,15 @@ OP_REGISTRY = {
         triton_op='/',
     ),
 
+    # M_div_fp: A[f,p] / B[p] -> C[f,p] (broadcast divide for output normalization)
+    'M_div_fp': OpSpec(
+        name='M_div_fp',
+        op_type='map',
+        output_dims=DimSpec(('f', 'p')),
+        triton_op='/',
+        compute_fn='lambda A, B: A / B.unsqueeze(0)'
+    ),
+
     # M_mul_fm1m0p: A[m1,m0,p] * V[f,m1,m0] -> temp[f,m1,m0,p]
     'M_mul_fm1m0p': OpSpec(
         name='M_mul_fm1m0p',
