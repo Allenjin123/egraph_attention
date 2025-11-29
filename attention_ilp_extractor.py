@@ -357,7 +357,44 @@ class ILPGenerator:
         # C7: Operator activation (optional, for operator minimization)
         lines.extend(self._constraint_operator_activation())
 
+        # C8: M_div_fp must have distinct children (numerator != denominator)
+        lines.extend(self._constraint_mdiv_distinct_children())
+
         lines.append("")
+        return lines
+
+    def _constraint_mdiv_distinct_children(self) -> List[str]:
+        """C8: Ensure M_div_fp gets distinct numerator and denominator."""
+        lines = []
+
+        # Find all M_div_fp nodes
+        for (eclass_id, node_id), n_var in self.node_vars.items():
+            if node_id not in self.egraph.enodes:
+                continue
+
+            node = self.egraph.enodes[node_id]
+            if node.op == 'M_div_fp' and len(node.children) == 2:
+                child0_eclass = node.children[0]
+                child1_eclass = node.children[1]
+
+                # If both children from same eclass, need to select different nodes
+                if child0_eclass == child1_eclass:
+                    # Find all R_add_m1 nodes in this eclass
+                    if child0_eclass in self.egraph.eclasses:
+                        r_add_nodes = [
+                            nid for nid in self.egraph.eclasses[child0_eclass].member_enodes
+                            if nid in self.egraph.enodes and self.egraph.enodes[nid].op == 'R_add_m1'
+                        ]
+
+                        if len(r_add_nodes) >= 2:
+                            # If M_div_fp is selected, at least 2 different R_add_m1 must be selected
+                            node_vars = [self.node_vars.get((child0_eclass, r_nid)) for r_nid in r_add_nodes if (child0_eclass, r_nid) in self.node_vars]
+
+                            if len(node_vars) >= 2:
+                                # Sum of selected R_add_m1 nodes >= 2 * M_div_fp selection
+                                constraint = f" MDIV_DISTINCT_{sanitize(eclass_id)}_{sanitize(node_id)}: {' + '.join(node_vars)} - 2 {n_var} >= 0"
+                                lines.append(constraint)
+
         return lines
 
     def _constraint_one_node_per_eclass(self) -> List[str]:
@@ -683,6 +720,76 @@ class SolutionExtractor:
         nodes = {}
         original_nodes = original_data.get('nodes', {})
 
+        # First pass: check if we need to add missing R_add_m1 nodes for M_div_fp
+        additional_nodes = set()
+        for eclass_id, node_id in choices.items():
+            if node_id in original_nodes and original_nodes[node_id].get('op') == 'M_div_fp':
+                # Check if children are duplicates or missing
+                orig_children = original_nodes[node_id].get('children', [])
+                if len(orig_children) == 2:
+                    # Map children through choices
+                    child0_eclass = original_nodes.get(orig_children[0], {}).get('eclass')
+                    child1_eclass = original_nodes.get(orig_children[1], {}).get('eclass')
+
+                    if child0_eclass and child1_eclass and child0_eclass == child1_eclass:
+                        # Both from same eclass - need to find alternatives
+                        print(f"  M_div_fp requires distinct children from eclass {child0_eclass}")
+
+                        # Find all R_add_m1 in original graph
+                        # Look 2 levels deep: R_add_m1 → R_add_m0 → M_mul_fmp/M_mul_m1p
+                        r_add_candidates = []
+                        for o_nid, o_node in original_nodes.items():
+                            if o_node.get('op') == 'R_add_m1':
+                                o_children = o_node.get('children', [])
+                                if o_children and o_children[0] in original_nodes:
+                                    # Level 1: typically R_add_m0 or M_mul_m1p
+                                    child1 = original_nodes[o_children[0]]
+                                    child1_op = child1.get('op', '')
+
+                                    # If child is R_add_m0, look one level deeper
+                                    if child1_op == 'R_add_m0' and child1.get('children'):
+                                        gc_id = child1.get('children')[0]
+                                        if gc_id in original_nodes:
+                                            child1_op = original_nodes[gc_id].get('op', '')
+
+                                    r_add_candidates.append((o_nid, child1_op))
+
+                        # Pick two with different grandchildren
+                        output_r_add = None
+                        denom_r_add = None
+
+                        print(f"    Found {len(r_add_candidates)} R_add_m1 candidates:")
+                        for r_nid, gc_op in r_add_candidates:
+                            print(f"      {r_nid}: grandchild_op={gc_op}")
+                            if ('mul_fmp' in gc_op.lower() or 'mul_fm' in gc_op.lower()) and not output_r_add:
+                                output_r_add = r_nid
+                                print(f"        → Selected as OUTPUT")
+                            elif 'mul_m1p' in gc_op.lower() and not denom_r_add:
+                                denom_r_add = r_nid
+                                print(f"        → Selected as DENOMINATOR")
+
+                        if output_r_add and denom_r_add:
+                            additional_nodes.add(output_r_add)
+                            additional_nodes.add(denom_r_add)
+                            print(f"    ✓ Adding R_add_m1 nodes: output={output_r_add}, denom={denom_r_add}")
+
+                            # Recursively add all dependencies
+                            def add_deps_recursively(nid, depth=0):
+                                if depth > 5 or nid in additional_nodes:  # Prevent infinite recursion
+                                    return
+                                if nid in original_nodes:
+                                    additional_nodes.add(nid)
+                                    print(f"      {'  ' * depth}Adding: {nid} ({original_nodes[nid].get('op')})")
+                                    for c in original_nodes[nid].get('children', []):
+                                        add_deps_recursively(c, depth + 1)
+
+                            # Add dependencies for both R_add_m1 nodes
+                            for r_nid in [output_r_add, denom_r_add]:
+                                for gc_nid in original_nodes.get(r_nid, {}).get('children', []):
+                                    add_deps_recursively(gc_nid)
+                        else:
+                            print(f"    ✗ Could not find both output and denom: output={output_r_add}, denom={denom_r_add}")
+
         # Build mapping from eclass to original node IDs (for primitives)
         eclass_to_original_nodes = {}
         for node_id, node_data in original_nodes.items():
@@ -703,12 +810,19 @@ class SolutionExtractor:
         # Merge primitive choices with ILP choices
         all_choices = {**primitive_choices, **choices}
 
-        # Include selected nodes and primitives
-        included_nodes = set(all_choices.values())
+        # Include selected nodes, primitives, and additional nodes for M_div_fp fix
+        included_nodes = set(all_choices.values()) | additional_nodes
+
+        if additional_nodes:
+            print(f"  Total nodes after M_div_fp fix: {len(included_nodes)} (added {len(additional_nodes)} nodes)")
+            print(f"    Additional nodes: {list(additional_nodes)}")
 
         for node_id in included_nodes:
             # Get from original data to preserve structure
             if node_id in original_nodes:
+                # Debug: track if this is an additional node
+                if node_id in additional_nodes:
+                    print(f"    Processing additional node: {node_id} ({original_nodes[node_id].get('op')})")
                 orig_node = original_nodes[node_id]
                 eclass_id = orig_node.get('eclass')
 
@@ -718,14 +832,86 @@ class SolutionExtractor:
                 # For non-primitive nodes, map children through choices
                 if not (eclass_id and (eclass_id.startswith('i64') or eclass_id.startswith('String'))):
                     child_node_ids = []
-                    for child_node_id in orig_children:
-                        # Find the eclass of this child
-                        child_eclass = original_nodes.get(child_node_id, {}).get('eclass')
-                        if child_eclass and child_eclass in all_choices:
-                            child_node_ids.append(all_choices[child_eclass])
+
+                    # Special case: M_div_fp needs distinct numerator and denominator
+                    if orig_node.get('op') == 'M_div_fp' and len(orig_children) == 2:
+                        child0_id = orig_children[0]
+                        child1_id = orig_children[1]
+                        child0_eclass = original_nodes.get(child0_id, {}).get('eclass')
+                        child1_eclass = original_nodes.get(child1_id, {}).get('eclass')
+
+                        # If both children from same eclass OR same node ID, find DIFFERENT nodes
+                        if (child0_eclass == child1_eclass or child0_id == child1_id) and child0_eclass:
+                            # Find all nodes of same operation type in this eclass
+                            child0_op = original_nodes.get(child0_id, {}).get('op', '')
+                            same_eclass_nodes = [
+                                nid for nid, n in original_nodes.items()
+                                if n.get('eclass') == child0_eclass and n.get('op') == child0_op
+                            ]
+
+                            if len(same_eclass_nodes) >= 2:
+                                # Use first two different nodes
+                                child_node_ids = same_eclass_nodes[:2]
+                                print(f"  M_div_fp fix: Using distinct {child0_op} nodes: {child_node_ids[0]}, {child_node_ids[1]}")
+                            else:
+                                # Only one node in this eclass - use nodes from additional_nodes
+                                # These were already added by the first M_div_fp fix pass
+                                print(f"  M_div_fp fix: Using nodes from extracted graph...")
+                                all_r_add_m1_in_extracted = [
+                                    nid for nid in included_nodes
+                                    if nid in original_nodes and original_nodes[nid].get('op') == 'R_add_m1'
+                                ]
+
+                                if len(all_r_add_m1_in_extracted) >= 2:
+                                    # Prefer ones that reduce different things (look 2 levels deep)
+                                    output_r_add = None
+                                    denom_r_add = None
+
+                                    for r_nid in all_r_add_m1_in_extracted:
+                                        r_node = original_nodes[r_nid]
+                                        r_children = r_node.get('children', [])
+                                        if r_children and r_children[0] in original_nodes:
+                                            child1 = original_nodes[r_children[0]]
+                                            grandchild_op = child1.get('op', '')
+
+                                            # Look deeper if it's R_add_m0
+                                            if grandchild_op == 'R_add_m0' and child1.get('children'):
+                                                gc_id = child1.get('children')[0]
+                                                if gc_id in original_nodes:
+                                                    grandchild_op = original_nodes[gc_id].get('op', '')
+
+                                            if ('mul_fmp' in grandchild_op.lower() or 'mul_fm' in grandchild_op.lower()) and not output_r_add:
+                                                output_r_add = r_nid
+                                            elif 'mul_m1p' in grandchild_op.lower() and not denom_r_add:
+                                                denom_r_add = r_nid
+
+                                    if output_r_add and denom_r_add:
+                                        child_node_ids = [output_r_add, denom_r_add]
+                                        print(f"    Using: numerator={output_r_add}, denominator={denom_r_add}")
+                                    else:
+                                        # Fallback: use first two
+                                        child_node_ids = all_r_add_m1_in_extracted[:2]
+                                        print(f"    Using first two from extracted: {child_node_ids}")
+                                else:
+                                    # Can't fix - use original
+                                    child_node_ids = orig_children
                         else:
-                            # Keep original reference for primitives
-                            child_node_ids.append(child_node_id)
+                            # Different eclasses - map through choices
+                            for child_node_id in orig_children:
+                                child_eclass = original_nodes.get(child_node_id, {}).get('eclass')
+                                if child_eclass and child_eclass in all_choices:
+                                    child_node_ids.append(all_choices[child_eclass])
+                                else:
+                                    child_node_ids.append(child_node_id)
+                    else:
+                        # Normal mapping for other operations
+                        for child_node_id in orig_children:
+                            child_eclass = original_nodes.get(child_node_id, {}).get('eclass')
+                            if child_eclass and child_eclass in all_choices:
+                                child_node_ids.append(all_choices[child_eclass])
+                            else:
+                                # Keep original reference for primitives
+                                child_node_ids.append(child_node_id)
                 else:
                     child_node_ids = orig_children
 

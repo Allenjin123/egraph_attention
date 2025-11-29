@@ -244,7 +244,7 @@
     "function-1-M_div_fp": {
       "op": "M_div_fp",
       "children": [
-        "function-2-R_add_m",
+        "function-3-R_add_m1",
         "function-3-M_div_fp"
       ],
       "eclass": "Tensor-11",
@@ -264,7 +264,7 @@
     "function-3-M_div_fp": {
       "op": "M_div_fp",
       "children": [
-        "function-2-R_add_m",
+        "function-3-R_add_m1",
         "function-3-R_add_m1"
       ],
       "eclass": "Tensor-11",
@@ -298,15 +298,6 @@
       "cost": 1.0,
       "subsumed": false
     },
-    "function-2-R_add_m": {
-      "op": "R_add_m",
-      "children": [
-        "function-1-M_mul_fmp"
-      ],
-      "eclass": "Tensor-23",
-      "cost": 1.0,
-      "subsumed": false
-    },
     "function-0-R_add_m0": {
       "op": "R_add_m0",
       "children": [
@@ -330,7 +321,7 @@
       "children": [
         "function-1-M_mul_fmp"
       ],
-      "eclass": "Tensor-27",
+      "eclass": "Tensor-23",
       "cost": 10.0,
       "subsumed": false
     },
@@ -366,7 +357,7 @@
       "children": [
         "function-2-R_add_m0"
       ],
-      "eclass": "Tensor-23",
+      "eclass": "Tensor-24",
       "cost": 100.0,
       "subsumed": false
     },
@@ -493,7 +484,7 @@
       "type": "Tensor",
       "let": "AV"
     },
-    "Tensor-23": {
+    "Tensor-24": {
       "type": "Tensor"
     },
     "Tensor-20": {
@@ -502,7 +493,7 @@
     "Tensor-15": {
       "type": "Tensor"
     },
-    "Tensor-27": {
+    "Tensor-23": {
       "type": "Tensor"
     }
   }

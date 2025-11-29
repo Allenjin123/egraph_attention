@@ -6,17 +6,23 @@ Compares attention implementations WITHOUT model overhead:
 - SDPA: torch.nn.functional.scaled_dot_product_attention (Flash Attention backend)
 - Triton: Our custom Triton implementation
 - PyTorch: torch.compile'd graph-driven implementation
-- TritonGD_2p: Graph-driven Triton (2-pass FuseMax, AUTO-GENERATED) ✓
-- TritonGD_3p: Graph-driven Triton (3-pass, AUTO-GENERATED) ✓
+- TritonGD_2p: Graph-driven Triton (2-pass, AUTO-GENERATED from ILP) ✓
+- TritonGD_3p: Graph-driven Triton (3-pass, AUTO-GENERATED from ILP) ✓
 
 Graph-Driven Generation Status:
-  ✓ BOTH kernels are fully automatically generated from egglog JSON!
-  ✓ 2-pass algorithm: Auto-generated from attention_2pass.json
-  ✓ 3-pass algorithm: Auto-generated from attention.json
-  ✓ PassAnalyzer: Automatically infers pass structure
+  ✓ BOTH kernels are fully automatically generated from ILP-optimized egglog graphs!
+  ✓ 2-pass algorithm: Auto-generated from attention_2pass_ilp.json
+  ✓ 3-pass algorithm: Auto-generated from attention_3pass_ilp.json
+  ✓ PassAnalyzer: Automatically infers pass structure from any egglog output
   ✓ No hardcoded if/else for algorithm types
+  ✓ Handles different graph structures (regular vs ILP-optimized)
 
 Usage:
+    # Generate ILP-optimized kernels first:
+    python generate_triton_kernel.py attention_2pass_ilp.json -o generated_triton_2pass_ilp.py
+    python generate_triton_kernel.py attention_3pass_ilp.json -o generated_triton_3pass_ilp.py
+
+    # Run benchmark:
     python kernel_benchmark.py --num-heads 32 --head-dim 64 --seq-lengths 256,512,1024,2048
 """
 
@@ -46,7 +52,7 @@ except ImportError:
     print("Warning: generated_pytorch_2pass.py not found")
 
 # Import Triton graph-driven implementations (AUTO-GENERATED!)
-# Both kernels are now automatically generated from egglog JSON
+# Both kernels are automatically generated from egglog JSON
 try:
     from generated_triton_2pass_auto import attention_kernel_2pass
     TRITON_GD_2PASS_AVAILABLE = True
@@ -123,27 +129,27 @@ def pytorch_attention(Q, K, V, scale, causal=True):
 
 def triton_gd_2pass(Q, K, V, scale, causal=True):
     """
-    TritonGD 2-pass (AUTO-GENERATED from attention_2pass.json) ✓
+    TritonGD 2-pass (AUTO-GENERATED from ILP-optimized graph) ✓
     - FuseMax algorithm with tiling
     - 2 memory passes, 3 sync levels
     - 1 post-loop operation
-    - Fully automatic code generation works!
+    - Generated from attention_2pass_ilp.json
     """
     if not TRITON_GD_2PASS_AVAILABLE:
-        raise RuntimeError("generated_triton_2pass_auto.py not found")
+        raise RuntimeError("generated_triton_2pass_ilp.py not found")
     return attention_kernel_2pass(Q, K, V, scale=scale, causal=False)
 
 
 def triton_gd_3pass(Q, K, V, scale, causal=True):
     """
-    TritonGD 3-pass (AUTO-GENERATED from attention.json) ✓
+    TritonGD 3-pass (AUTO-GENERATED from ILP-optimized graph) ✓
     - Standard 3-pass softmax algorithm
     - 3 memory passes, 3 sync levels
     - 0 post-loop operations
-    - Fully automatic code generation works!
+    - Generated from attention_3pass_ilp.json
     """
     if not TRITON_GD_3PASS_AVAILABLE:
-        raise RuntimeError("generated_triton_3pass_auto.py not found")
+        raise RuntimeError("generated_triton_3pass_ilp.py not found")
     return attention_kernel_3pass(Q, K, V, scale=scale, causal=False)
 
 

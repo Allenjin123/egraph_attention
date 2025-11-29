@@ -135,17 +135,21 @@
 ; Step 2: Transform output when correction exists
 ; Match: any expression using M_div_m1m0p and M_mul_fmp with V
 ; Uses proper names for 2-pass output tensors
+; IMPORTANT: Keep numerator (output) and denominator (gd) in separate eclasses
 (rule
   ((= output (R_add_m1 (R_add_m0 (M_mul_fmp div_result v))))
    (= div_result (M_div_m1m0p sln sum))
    (= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
    (= lm (R_max_m0 bqk))
    (= cn (M_mul_m1m0p sln prm))
-   (= gd (R_add_m1 cd)))
+   (= gd (R_add_m1 cd))
+   (= cd (M_mul_m1p sld prm)))
   ((let A_unnorm (T_unsplit_m1m0_m cn))
    (let AV_temp (M_mul_fmp A_unnorm v))
-   (let AV_acc (R_add_m AV_temp))
-   (let AV (M_div_fp AV_acc gd))
+   (let AV_unnorm (R_add_m1 (R_add_m0 AV_temp)))
+   ; Create M_div_fp with output as AV_unnorm and denominator as gd
+   ; These should be in different eclasses because they have different inputs
+   (let AV (M_div_fp AV_unnorm gd))
    (union output AV))
 )
 

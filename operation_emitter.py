@@ -440,12 +440,18 @@ class HoleEmitter:
                     if 'max' in node.op.lower():
                         acc_name = 'global_max'
                     elif 'add' in node.op.lower() or 'sum' in node.op.lower():
-                        # Check if child is M_mul_fmp (weighted V multiplication)
-                        has_mul_fmp_child = any(
-                            'mul_fmp' in self.graph.nodes[c].op
-                            for c in node.children
-                            if c in self.graph.nodes
-                        )
+                        # Check if this ultimately reduces weighted output (M_mul_fmp)
+                        # May be direct child or through R_add_m0
+                        def has_mul_fmp_ancestor(nid, depth=0):
+                            if depth > 2 or nid not in self.graph.nodes:
+                                return False
+                            n = self.graph.nodes[nid]
+                            if 'mul_fmp' in n.op:
+                                return True
+                            return any(has_mul_fmp_ancestor(c, depth+1) for c in n.children)
+
+                        has_mul_fmp = any(has_mul_fmp_ancestor(c) for c in node.children)
+
                         # Check if child is M_exp (softmax numerator)
                         has_exp_child = any(
                             'exp' in self.graph.nodes[c].op
@@ -453,7 +459,7 @@ class HoleEmitter:
                             if c in self.graph.nodes
                         )
 
-                        if has_mul_fmp_child:
+                        if has_mul_fmp:
                             acc_name = 'acc_out'  # Output accumulation
                         elif has_exp_child:
                             acc_name = 'acc_sum'  # Softmax denominator
@@ -589,11 +595,6 @@ class HoleEmitter:
                             acc_code = self._emit_global_reduction_accumulation(node, acc_name, analyzer)
                             for code_line in acc_code:
                                 lines.append(f"        {code_line}")
-                        # Special case: M_mul_fmp followed by R_add_m should be fused
-                        elif node.op in ('M_mul_fmp', 'M_mul_fm1m0p'):
-                            # Don't emit this - will be handled by the R_add_m accumulation
-                            # Just register that it exists
-                            self.op_emitter.var_map[node.id] = TritonVar('pending_weighted_v', '[BLOCK_M, BLOCK_K]')
                         else:
                             # Regular operation
                             op_code = self.op_emitter.emit_operation(node)
@@ -671,9 +672,25 @@ class HoleEmitter:
             self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M]')
 
         elif node.op in ('R_add_m0',):
-            # Local sum
-            lines.append(f"local_sum = tl.sum({input_var}, axis=1)")
-            self.op_emitter.var_map[node.id] = TritonVar('local_sum', '[BLOCK_M]')
+            # Local sum - check if it's reducing weighted output
+            input_node = self.graph.nodes.get(node.children[0]) if node.children else None
+            if input_node and input_node.op in ('M_mul_fmp', 'M_mul_fm1m0p'):
+                # This is reducing weighted V output - should be a matmul
+                # Get the weights (child of M_mul_fmp)
+                if input_node.children:
+                    weight_var = self.op_emitter._get_child_var(input_node.children[0])
+                    # Emit fused matmul
+                    lines.append(f"weighted_v = tl.dot({weight_var}.to(v.dtype), v)  # [BLOCK_M, BLOCK_K]")
+                    # Register both M_mul_fmp and this R_add_m0
+                    self.op_emitter.var_map[input_node.id] = TritonVar('weighted_v', '[BLOCK_M, BLOCK_K]')
+                    self.op_emitter.var_map[node.id] = TritonVar('weighted_v', '[BLOCK_M, BLOCK_K]')
+                else:
+                    lines.append(f"local_sum = tl.sum({input_var}, axis=1)")
+                    self.op_emitter.var_map[node.id] = TritonVar('local_sum', '[BLOCK_M]')
+            else:
+                # Regular local sum
+                lines.append(f"local_sum = tl.sum({input_var}, axis=1)")
+                self.op_emitter.var_map[node.id] = TritonVar('local_sum', '[BLOCK_M]')
 
         elif node.op in ('R_add_m1', 'R_add_m'):
             # Global sum - accumulate
