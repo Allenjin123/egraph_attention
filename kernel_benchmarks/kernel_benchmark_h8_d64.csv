@@ -1,3 +1,4 @@
-Sequence_Length,Eager_ms,SDPA_ms,Triton_ms,PyTorch_ms,TritonGD_ms
-256,inf,0.010,0.018,0.066,0.015
-512,inf,0.016,0.015,0.839,0.015
+Sequence_Length,Eager_ms,SDPA_ms,Triton_ms,PyTorch_ms,TritonGD_2p_ms,TritonGD_3p_ms
+256,inf,0.009,0.018,0.063,0.012,0.012
+512,inf,0.016,0.014,0.983,0.017,0.019
+1024,inf,0.033,0.034,3.631,0.040,0.069

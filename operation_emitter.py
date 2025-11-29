@@ -118,8 +118,18 @@ class OperationEmitter:
             var_a = self._get_child_var(children[0])
             var_b = self._get_child_var(children[1])
 
-            # Get output shape
-            output_shape = self._dims_to_shape(node.output_dims)
+            # Add broadcasting if needed
+            # If var_b is 1D and output is 2D, add [:, None] for broadcasting
+            child_a = self.graph.nodes.get(children[0])
+            child_b = self.graph.nodes.get(children[1])
+
+            # Simple heuristic: if output has more dims than input_b, broadcast
+            if (node.output_dims and child_b and child_b.output_dims and
+                len(node.output_dims.dims) > len(child_b.output_dims.dims)):
+                var_b = f"{var_b}[:, None]"
+            elif (node.output_dims and child_a and child_a.output_dims and
+                  len(node.output_dims.dims) > len(child_a.output_dims.dims)):
+                var_a = f"{var_a}[:, None]"
 
             op = spec.triton_op
             if op == '*':
@@ -320,6 +330,52 @@ class HoleEmitter:
             hole_name = f"pass{pass_num + 1}_operations"  # +1 for 1-indexed
             self.scaffold.fill_hole(hole_name, pass_code)
 
+    def _find_per_tile_dependencies(self, passes, analyzer):
+        """
+        Find per-tile operations from earlier passes needed in later passes.
+        Recursively finds all transitive dependencies.
+
+        Returns:
+            Dict[int, List[str]] - {pass_idx: [node_ids to recompute]}
+        """
+        per_tile_deps = {i: set() for i in range(len(passes))}
+
+        def collect_deps(node_id, target_pass, visited=None):
+            """Recursively collect all per-tile dependencies."""
+            if visited is None:
+                visited = set()
+            if node_id in visited or node_id not in self.graph.nodes:
+                return
+            visited.add(node_id)
+
+            node = self.graph.nodes[node_id]
+            node_pass = analyzer.pass_levels.get(node_id, 0)
+
+            # If from earlier pass and per-tile, it's a dependency
+            if node_pass < target_pass and not analyzer.is_global_reduction(node_id):
+                per_tile_deps[target_pass].add(node_id)
+                # Recursively collect its dependencies too
+                for child_id in node.children:
+                    collect_deps(child_id, target_pass, visited)
+
+        for pass_idx, nodes in passes.items():
+            if pass_idx == 0:
+                continue
+
+            for node_id in nodes:
+                if node_id in self.graph.nodes:
+                    node = self.graph.nodes[node_id]
+                    # Collect all dependencies recursively
+                    for child_id in node.children:
+                        collect_deps(child_id, pass_idx)
+
+        # Convert sets to lists in topological order
+        result = {}
+        for pass_idx, dep_set in per_tile_deps.items():
+            result[pass_idx] = [d for d in self.graph.execution_order if d in dep_set]
+
+        return result
+
     def generate_kernel(self) -> str:
         """Generate the complete kernel with filled holes."""
         self.fill_all_holes()
@@ -362,18 +418,56 @@ class HoleEmitter:
         lines.append("    q = tl.load(Q_ptr + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)")
         lines.append("")
 
-        # Initialize accumulators based on what global reductions we have
-        lines.append("    # Initialize accumulators for global reductions")
-        for pass_num in sorted(passes.keys()):
-            for node_id in passes[pass_num]:
+        # Build accumulator mapping
+        accumulator_map = {}
+        seen_accumulators = set()
+
+        for pass_num, nodes in passes.items():
+            for node_id in nodes:
                 if analyzer.is_global_reduction(node_id):
                     node = self.graph.nodes[node_id]
+
+                    # Map to accumulator name based on operation and context
                     if 'max' in node.op.lower():
-                        lines.append("    global_max = tl.full([BLOCK_M], value=-float('inf'), dtype=tl.float32)")
+                        acc_name = 'global_max'
                     elif 'add' in node.op.lower() or 'sum' in node.op.lower():
-                        lines.append("    global_sum = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)")
-                        lines.append("    acc = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)")
+                        # Check if child is M_mul_fmp (weighted V multiplication)
+                        has_mul_fmp_child = any(
+                            'mul_fmp' in self.graph.nodes[c].op
+                            for c in node.children
+                            if c in self.graph.nodes
+                        )
+                        # Check if child is M_exp (softmax numerator)
+                        has_exp_child = any(
+                            'exp' in self.graph.nodes[c].op
+                            for c in node.children
+                            if c in self.graph.nodes
+                        )
+
+                        if has_mul_fmp_child:
+                            acc_name = 'acc_out'  # Output accumulation
+                        elif has_exp_child:
+                            acc_name = 'acc_sum'  # Softmax denominator
+                        else:
+                            acc_name = f'acc_pass{pass_num}'  # Generic accumulator
+
+                    accumulator_map[node_id] = acc_name
+
+                    # Emit initialization once
+                    if acc_name not in seen_accumulators:
+                        if acc_name == 'global_max':
+                            lines.append("    global_max = tl.full([BLOCK_M], value=-float('inf'), dtype=tl.float32)")
+                        elif acc_name == 'acc_out':
+                            lines.append("    acc_out = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)")
+                        else:
+                            # Generic accumulator (sum)
+                            lines.append(f"    {acc_name} = tl.zeros([BLOCK_M], dtype=tl.float32)")
+                        seen_accumulators.add(acc_name)
+
         lines.append("")
+
+        # Build dependency info
+        per_tile_deps = self._find_per_tile_dependencies(passes, analyzer)
 
         # Generate K/V loops for each memory pass
         for pass_idx in range(mem_info.num_memory_passes):
@@ -399,25 +493,103 @@ class HoleEmitter:
             if pass_idx in passes:
                 lines.append(f"        # Operations for sync level {pass_idx}")
 
-                # Detect and optimize QK computation pattern
-                qk_computed = self._try_emit_qk_pattern(passes[pass_idx], lines, analyzer)
+                # Check if any dependency needs QK (recursively)
+                def needs_qk(node_id):
+                    """Check if computing this node requires QK."""
+                    if node_id not in self.graph.nodes:
+                        return False
+                    node = self.graph.nodes[node_id]
+                    if node.op in ('M_mul_em1m0p', 'M_mul_emp', 'R_add_e'):
+                        return True
+                    # Recursively check children
+                    return any(needs_qk(c) for c in node.children)
 
+                needs_qk_recompute = any(needs_qk(dep_id) for dep_id in per_tile_deps[pass_idx])
+
+                # If QK is needed, emit it first
+                if needs_qk_recompute:
+                    lines.append("        # QK = Q @ K^T (recomputed from dependency)")
+                    lines.append("        qk = tl.dot(q, tl.trans(k)) * scale  # [BLOCK_M, BLOCK_N]")
+                    qk_computed = True
+                else:
+                    # Otherwise try to detect QK pattern in current pass
+                    qk_computed = self._try_emit_qk_pattern(passes[pass_idx], lines, analyzer)
+
+                # Then: Recompute per-tile dependencies from earlier passes (that depend on QK)
+                if per_tile_deps[pass_idx]:
+                    lines.append(f"        # Recompute per-tile dependencies from earlier passes")
+                    # Sort dependencies in topological order
+                    dep_order = [d for d in self.graph.execution_order if d in per_tile_deps[pass_idx]]
+                    for dep_id in dep_order:
+                        dep_node = self.graph.nodes[dep_id]
+                        # Skip primitives and inputs
+                        if dep_node.is_primitive() or dep_node.op == 'CreateTensor':
+                            continue
+                        # Skip QK pattern ops (already emitted above)
+                        qk_optimized = dep_node.op in ('M_mul_em1m0p', 'M_mul_emp', 'R_add_e')
+                        if not qk_optimized:
+                            dep_code = self.op_emitter.emit_operation(dep_node)
+                            for code_line in dep_code:
+                                lines.append(f"        {code_line}")
+                    lines.append("")
+
+                # Helper: Check if operation is needed in this pass
+                def is_needed_in_pass(node_id, current_pass):
+                    """Check if an operation needs to be emitted in this pass."""
+                    # Always emit global reductions (they update accumulators)
+                    if analyzer.is_global_reduction(node_id):
+                        return True
+
+                    # Check if any user is in THIS pass (not recomputed later)
+                    # If all users are in later passes, skip (will be recomputed)
+                    has_user_in_this_pass = False
+                    has_user_in_later_pass = False
+
+                    for other_id, other in self.graph.nodes.items():
+                        if node_id in other.children:
+                            other_pass = analyzer.pass_levels.get(other_id, 0)
+                            if other_pass == current_pass:
+                                has_user_in_this_pass = True
+                            elif other_pass > current_pass:
+                                has_user_in_later_pass = True
+
+                    # If only used in later passes, skip (will be recomputed)
+                    if has_user_in_later_pass and not has_user_in_this_pass:
+                        return False
+
+                    return True
+
+                # Emit operations in this pass
                 for node_id in passes[pass_idx]:
                     if node_id in self.graph.nodes:
                         node = self.graph.nodes[node_id]
                         if node.is_primitive() or node.op == 'CreateTensor':
                             continue
 
-                        # Skip if already handled by pattern detection
+                        # Skip if handled by QK pattern
                         if qk_computed and node.op in ('M_mul_em1m0p', 'M_mul_emp', 'R_add_e'):
                             continue
 
-                        op_code = self.op_emitter.emit_operation(node)
-                        for code_line in op_code:
-                            lines.append(f"        {code_line}")
+                        # Skip if not needed in this pass (will be recomputed later)
+                        if not is_needed_in_pass(node_id, pass_idx):
+                            continue
 
+                        # Global reduction? Emit accumulation
                         if analyzer.is_global_reduction(node_id):
-                            lines.append(f"        # ^ Global reduction")
+                            acc_name = accumulator_map.get(node_id, 'unknown')
+                            acc_code = self._emit_global_reduction_accumulation(node, acc_name, analyzer)
+                            for code_line in acc_code:
+                                lines.append(f"        {code_line}")
+                        # Special case: M_mul_fmp followed by R_add_m should be fused
+                        elif node.op in ('M_mul_fmp', 'M_mul_fm1m0p'):
+                            # Don't emit this - will be handled by the R_add_m accumulation
+                            # Just register that it exists
+                            self.op_emitter.var_map[node.id] = TritonVar('pending_weighted_v', '[BLOCK_M, BLOCK_K]')
+                        else:
+                            # Regular operation
+                            op_code = self.op_emitter.emit_operation(node)
+                            for code_line in op_code:
+                                lines.append(f"        {code_line}")
             lines.append("")
 
         # Post-loop operations
@@ -431,12 +603,104 @@ class HoleEmitter:
                         lines.append(f"    {code_line}")
             lines.append("")
 
+        # Determine output variable
+        if mem_info.post_loop_ops:
+            # Output is from last post-loop operation
+            output_node_id = mem_info.post_loop_ops[-1]
+            if output_node_id in self.op_emitter.var_map:
+                output_var = self.op_emitter.var_map[output_node_id].name
+            else:
+                output_var = 'acc_out'  # Fallback
+        else:
+            # Output is from accumulator
+            output_var = 'acc_out'
+
         # Store output
         lines.append("    # Store output")
         lines.append("    Out_ptr = Out + pid_b * stride_ob + pid_h * stride_oh")
-        lines.append("    tl.store(Out_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok, acc)")
+        lines.append(f"    tl.store(Out_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok, {output_var})")
 
         return "\n".join(lines)
+
+    def _emit_global_reduction_accumulation(self, node, accumulator_name, analyzer):
+        """
+        Emit accumulation code for global reductions.
+
+        Args:
+            node: IRNode for the global reduction
+            accumulator_name: Name of the accumulator variable
+            analyzer: PassAnalyzer instance
+
+        Returns:
+            List of code lines
+        """
+        lines = []
+        input_var = self.op_emitter._get_child_var(node.children[0]) if node.children else "unknown"
+
+        if node.op == 'R_max_m0':
+            # Local max (per-tile, not global)
+            lines.append(f"local_max = tl.max({input_var}, axis=1)")
+            # Register for later use
+            self.op_emitter.var_map[node.id] = TritonVar('local_max', '[BLOCK_M]')
+
+        elif node.op in ('R_max_m1', 'R_max_m'):
+            # Global max - accumulate across tiles
+            # Check what the input operation is
+            input_node = self.graph.nodes.get(node.children[0]) if node.children else None
+
+            if input_node and input_node.op == 'R_add_e':
+                # Input is from QK computation (2D), reduce first
+                lines.append(f"tile_max = tl.max({input_var}, axis=1)")
+                lines.append(f"{accumulator_name} = tl.maximum({accumulator_name}, tile_max)")
+            elif input_node and input_node.op in ('R_max_m0', 'R_max_m'):
+                # Input is already a local max (1D), just accumulate
+                lines.append(f"{accumulator_name} = tl.maximum({accumulator_name}, {input_var})")
+            else:
+                # Default: assume 1D and accumulate
+                lines.append(f"{accumulator_name} = tl.maximum({accumulator_name}, {input_var})")
+            # Register accumulator
+            self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M]')
+
+        elif node.op in ('R_add_m0',):
+            # Local sum
+            lines.append(f"local_sum = tl.sum({input_var}, axis=1)")
+            self.op_emitter.var_map[node.id] = TritonVar('local_sum', '[BLOCK_M]')
+
+        elif node.op in ('R_add_m1', 'R_add_m'):
+            # Global sum - accumulate
+            # Check what the input operation is
+            input_node = self.graph.nodes.get(node.children[0]) if node.children else None
+
+            # Check if this is output accumulation (follows M_mul_fmp)
+            is_output_reduction = input_node and input_node.op in ('M_mul_fmp', 'M_mul_fm1m0p')
+
+            if is_output_reduction:
+                # This is output accumulation: softmax_weights @ V
+                # Get the weights (child of M_mul_fmp)
+                mul_fmp_node = input_node
+                if mul_fmp_node.children:
+                    weight_var = self.op_emitter._get_child_var(mul_fmp_node.children[0])
+                    # Emit fused dot product
+                    lines.append(f"weighted_v = tl.dot({weight_var}.to(v.dtype), v)  # [BLOCK_M, BLOCK_K]")
+                    lines.append(f"{accumulator_name} += weighted_v")
+                    # Register variables
+                    self.op_emitter.var_map[mul_fmp_node.id] = TritonVar('weighted_v', '[BLOCK_M, BLOCK_K]')
+                    self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M, BLOCK_K]')
+                else:
+                    # Fallback
+                    lines.append(f"{accumulator_name} += {input_var}")
+                    self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M, BLOCK_K]')
+            elif input_node and input_node.op in ('M_exp_mp', 'M_exp_m1m0p'):
+                # Input is 2D exp values, reduce then accumulate
+                lines.append(f"tile_sum = tl.sum({input_var}, axis=1)")
+                lines.append(f"{accumulator_name} += tile_sum")
+                self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M]')
+            else:
+                # Input is already 1D (e.g., from M_mul_m1p), just accumulate
+                lines.append(f"{accumulator_name} += {input_var}")
+                self.op_emitter.var_map[node.id] = TritonVar(accumulator_name, '[BLOCK_M]')
+
+        return lines
 
     def _try_emit_qk_pattern(self, node_ids: List[str], lines: List[str], analyzer: PassAnalyzer) -> bool:
         """
@@ -464,7 +728,7 @@ class HoleEmitter:
         if mul_node and add_node:
             # Emit optimized QK computation
             lines.append("        # QK = Q @ K^T (optimized)")
-            lines.append("        qk = tl.dot(q, tl.trans(k))  # [BLOCK_M, BLOCK_N]")
+            lines.append("        qk = tl.dot(q, tl.trans(k)) * scale  # [BLOCK_M, BLOCK_N]")
 
             # Register the variable
             self.op_emitter.var_map[add_node.id] = TritonVar('qk', '[BLOCK_M, BLOCK_N]')

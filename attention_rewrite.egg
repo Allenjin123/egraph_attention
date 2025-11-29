@@ -52,9 +52,21 @@
 ; ============================================================
 
 ; Rule 1: Insert tiling of K in matrix multiplication
+; Creates BK (tiled K) and BQK_temp (tiled Q*K)
 (rewrite
   (M_mul_emp q k)
   (M_mul_em1m0p q (T_split_m_m1m0 k 4)))
+
+; Give names to tiled tensors
+(rule
+  ((= bk (T_split_m_m1m0 k 4)))
+  ((let BK bk))
+)
+
+(rule
+  ((= bqk_temp (M_mul_em1m0p q bk)))
+  ((let BQK_temp bqk_temp))
+)
 
 ; Rule 2: Transform global max to local-then-global pattern
 (rewrite
@@ -77,6 +89,22 @@
   (M_sub_mp qk gm)
   (M_sub_m1m0p qk (R_max_m0 qk)))
 
+; Give names to 2-pass intermediate tensors
+(rule
+  ((= lm (R_max_m0 bqk)))
+  ((let LM lm))
+)
+
+(rule
+  ((= bqk_shifted (M_sub_m1m0p bqk lm)))
+  ((let BQK_shifted bqk_shifted))
+)
+
+(rule
+  ((= sln (M_exp_m1m0p shifted)))
+  ((let SLN sln))
+)
+
 ; Rule 6: Transform division to tiled version
 (rewrite
   (M_div_mp sn sd)
@@ -89,21 +117,24 @@
 ; Then use another rewrite to transform the output
 
 ; Step 1: Whenever we have local softmax, create correction factor
+; Uses proper names for 2-pass intermediate tensors
 (rule
   ((= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
    (= lm (R_max_m0 bqk)))
-  ((let gm (R_max_m1 lm))
-   (let prm (M_exp_m1p (M_sub_m1p lm gm)))
-   (let cn (M_mul_m1m0p sln prm))
-   (let sld (R_add_m0 sln))
-   (let cd (M_mul_m1p sld prm))
-   (let gd (R_add_m1 cd)))
+  ((let GM (R_max_m1 lm))
+   (let LM_GM_diff (M_sub_m1p lm GM))
+   (let PRM (M_exp_m1p LM_GM_diff))
+   (let CN (M_mul_m1m0p sln PRM))
+   (let SLD (R_add_m0 sln))
+   (let CD (M_mul_m1p SLD PRM))
+   (let GD (R_add_m1 CD)))
 )
 
 (run 10)
 
 ; Step 2: Transform output when correction exists
 ; Match: any expression using M_div_m1m0p and M_mul_fmp with V
+; Uses proper names for 2-pass output tensors
 (rule
   ((= output (R_add_m1 (R_add_m0 (M_mul_fmp div_result v))))
    (= div_result (M_div_m1m0p sln sum))
@@ -111,11 +142,11 @@
    (= lm (R_max_m0 bqk))
    (= cn (M_mul_m1m0p sln prm))
    (= gd (R_add_m1 cd)))
-  ((let a_unnorm (T_unsplit_m1m0_m cn))
-   (let av_temp (M_mul_fmp a_unnorm v))
-   (let av_acc (R_add_m av_temp))
-   (let av_2pass (M_div_fp av_acc gd))
-   (union output av_2pass))
+  ((let A_unnorm (T_unsplit_m1m0_m cn))
+   (let AV_temp (M_mul_fmp A_unnorm v))
+   (let AV_acc (R_add_m AV_temp))
+   (let AV (M_div_fp AV_acc gd))
+   (union output AV))
 )
 
 ; ============================================================
