@@ -24,9 +24,20 @@ import seaborn as sns
 # Import our Triton implementations
 from triton_attention import triton_naive_attention, triton_truly_naive_attention
 
-# Import egglog-generated attention kernels
-from generated_attention import egg_attention_triton as egg_3pass_attention
-from generated_2pass_attention import egg_attention_2pass_triton as egg_2pass_attention
+# Import egglog-generated hybrid attention kernels (Phase 2)
+try:
+    from generated_hybrid_2pass import egg_attention_hybrid_2pass
+    HYBRID_2PASS_AVAILABLE = True
+except ImportError:
+    HYBRID_2PASS_AVAILABLE = False
+    print("Warning: generated_hybrid_2pass.py not found")
+
+try:
+    from generated_hybrid_3pass import egg_attention_hybrid
+    HYBRID_3PASS_AVAILABLE = True
+except ImportError:
+    HYBRID_3PASS_AVAILABLE = False
+    print("Warning: generated_hybrid_3pass.py not found")
 
 
 # ============================================================================
@@ -83,25 +94,29 @@ def triton_truly_naive(Q, K, V, scale, causal=True):
     return triton_truly_naive_attention(Q, K, V, scale=scale, causal=causal)
 
 
-def egg_3pass(Q, K, V, scale, causal=True):
+def hybrid_3pass(Q, K, V, scale, causal=True):
     """
-    Egglog-generated 3-pass attention (no causal support yet)
+    Hybrid 3-pass attention (generated from egglog graph)
     - Pass 1: Compute QK, find row max
     - Pass 2: Compute exp sum
     - Pass 3: Compute output
     """
-    # Note: egglog-generated kernel doesn't support causal masking yet
-    return egg_3pass_attention(Q, K, V, scale=scale)
+    if not HYBRID_3PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_3pass.py not found")
+    # Note: hybrid kernel doesn't support causal masking yet
+    return egg_attention_hybrid(Q, K, V, scale=scale)
 
 
-def egg_2pass(Q, K, V, scale, causal=True):
+def hybrid_2pass(Q, K, V, scale, causal=True):
     """
-    Egglog-generated 2-pass tiled attention (FuseMax algorithm)
+    Hybrid 2-pass tiled attention (FuseMax algorithm, generated from egglog graph)
     - Pass 1: Find global max from local tile maxes
     - Pass 2: Apply correction factor, compute output
     """
-    # Note: egglog-generated kernel doesn't support causal masking yet
-    return egg_2pass_attention(Q, K, V, scale=scale)
+    if not HYBRID_2PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_2pass.py not found")
+    # Note: hybrid kernel doesn't support causal masking yet
+    return egg_attention_hybrid_2pass(Q, K, V, scale=scale)
 
 
 # ============================================================================
@@ -111,37 +126,40 @@ def egg_2pass(Q, K, V, scale, causal=True):
 def verify_correctness(Q, K, V, scale, tolerance=0.01):
     """
     Verify all implementations produce the same output.
+    All comparisons use non-causal (bidirectional) attention for fair comparison.
 
     Returns:
         True if all implementations match within tolerance
     """
     with torch.no_grad():
-        # Causal versions
-        out_eager = eager_attention(Q, K, V, scale, causal=True)
-        out_sdpa = sdpa_attention(Q, K, V, scale, causal=True)
-        out_triton = triton_attention(Q, K, V, scale, causal=True)
-        out_truly_naive = triton_truly_naive(Q, K, V, scale, causal=True)
-
-        # Non-causal reference for egglog kernels
-        out_eager_nc = eager_attention(Q, K, V, scale, causal=False)
-        out_egg_3pass = egg_3pass(Q, K, V, scale, causal=False)
-        out_egg_2pass = egg_2pass(Q, K, V, scale, causal=False)
+        # All non-causal for fair comparison
+        out_eager = eager_attention(Q, K, V, scale, causal=False)
+        out_sdpa = sdpa_attention(Q, K, V, scale, causal=False)
+        out_triton = triton_attention(Q, K, V, scale, causal=False)
+        out_truly_naive = triton_truly_naive(Q, K, V, scale, causal=False)
+        out_hybrid_3pass = hybrid_3pass(Q, K, V, scale, causal=False) if HYBRID_3PASS_AVAILABLE else None
+        out_hybrid_2pass = hybrid_2pass(Q, K, V, scale, causal=False) if HYBRID_2PASS_AVAILABLE else None
 
     diff_sdpa = (out_eager - out_sdpa).abs().max().item()
     diff_triton = (out_eager - out_triton).abs().max().item()
     diff_truly_naive = (out_eager - out_truly_naive).abs().max().item()
-    diff_egg_3pass = (out_eager_nc - out_egg_3pass).abs().max().item()
-    diff_egg_2pass = (out_eager_nc - out_egg_2pass).abs().max().item()
+    diff_hybrid_3pass = (out_eager - out_hybrid_3pass).abs().max().item() if out_hybrid_3pass is not None else float('inf')
+    diff_hybrid_2pass = (out_eager - out_hybrid_2pass).abs().max().item() if out_hybrid_2pass is not None else float('inf')
 
-    print(f"  Max diff eager vs SDPA:         {diff_sdpa:.6f}")
-    print(f"  Max diff eager vs Triton:       {diff_triton:.6f}")
-    print(f"  Max diff eager vs Truly Naive:  {diff_truly_naive:.6f}")
-    print(f"  Max diff eager vs Egg 3-pass:   {diff_egg_3pass:.6f} (non-causal)")
-    print(f"  Max diff eager vs Egg 2-pass:   {diff_egg_2pass:.6f} (non-causal)")
+    print(f"  Max diff eager vs SDPA:           {diff_sdpa:.6f}")
+    print(f"  Max diff eager vs Triton:         {diff_triton:.6f}")
+    print(f"  Max diff eager vs Truly Naive:    {diff_truly_naive:.6f}")
+    if HYBRID_3PASS_AVAILABLE:
+        print(f"  Max diff eager vs Hybrid 3-pass:  {diff_hybrid_3pass:.6f}")
+    if HYBRID_2PASS_AVAILABLE:
+        print(f"  Max diff eager vs Hybrid 2-pass:  {diff_hybrid_2pass:.6f}")
 
     passed = (diff_sdpa < tolerance and diff_triton < tolerance and
-              diff_truly_naive < tolerance and diff_egg_3pass < tolerance and
-              diff_egg_2pass < tolerance)
+              diff_truly_naive < tolerance)
+    if HYBRID_3PASS_AVAILABLE:
+        passed = passed and diff_hybrid_3pass < tolerance
+    if HYBRID_2PASS_AVAILABLE:
+        passed = passed and diff_hybrid_2pass < tolerance
     return passed
 
 
@@ -218,7 +236,7 @@ def main():
     print("=" * 60)
     print("STANDALONE ATTENTION KERNEL BENCHMARK")
     print("=" * 60)
-    print(f"Config: batch={batch_size}, heads={num_heads}, head_dim={head_dim}, causal=True")
+    print(f"Config: batch={batch_size}, heads={num_heads}, head_dim={head_dim}, causal=False")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Sequence lengths: {seq_lengths}")
     print(f"Warmup: {args.warmup}, Iterations: {args.iters}")
@@ -251,8 +269,8 @@ def main():
         "sdpa": {},
         "triton": {},
         "truly_naive": {},
-        "egg_3pass": {},
-        "egg_2pass": {},
+        "hybrid_3pass": {},
+        "hybrid_2pass": {},
     }
 
     for seq_len in seq_lengths:
@@ -269,7 +287,7 @@ def main():
         if not args.skip_eager:
             try:
                 eager_time = benchmark_kernel(
-                    eager_attention, Q, K, V, scale, True,
+                    eager_attention, Q, K, V, scale, False,
                     warmup=args.warmup, iters=args.iters
                 )
                 results["eager"][seq_len] = eager_time
@@ -284,7 +302,7 @@ def main():
         # SDPA attention
         try:
             sdpa_time = benchmark_kernel(
-                sdpa_attention, Q, K, V, scale, True,
+                sdpa_attention, Q, K, V, scale, False,
                 warmup=args.warmup, iters=args.iters
             )
             results["sdpa"][seq_len] = sdpa_time
@@ -296,7 +314,7 @@ def main():
         # Triton attention (online softmax)
         try:
             triton_time = benchmark_kernel(
-                triton_attention, Q, K, V, scale, True,
+                triton_attention, Q, K, V, scale, False,
                 warmup=args.warmup, iters=args.iters
             )
             results["triton"][seq_len] = triton_time
@@ -308,7 +326,7 @@ def main():
         # Truly Naive Triton (3-pass, no online softmax)
         try:
             truly_naive_time = benchmark_kernel(
-                triton_truly_naive, Q, K, V, scale, True,
+                triton_truly_naive, Q, K, V, scale, False,
                 warmup=args.warmup, iters=args.iters
             )
             results["truly_naive"][seq_len] = truly_naive_time
@@ -317,29 +335,35 @@ def main():
             print(f"  Triton (truly naive): FAILED ({e})")
             results["truly_naive"][seq_len] = float('inf')
 
-        # Egglog-generated 3-pass (non-causal)
-        try:
-            egg_3pass_time = benchmark_kernel(
-                egg_3pass, Q, K, V, scale, False,  # non-causal
-                warmup=args.warmup, iters=args.iters
-            )
-            results["egg_3pass"][seq_len] = egg_3pass_time
-            print(f"  Egg 3-pass:           {egg_3pass_time:.3f} ms (non-causal)")
-        except Exception as e:
-            print(f"  Egg 3-pass:           FAILED ({e})")
-            results["egg_3pass"][seq_len] = float('inf')
+        # Hybrid 3-pass (non-causal)
+        if HYBRID_3PASS_AVAILABLE:
+            try:
+                hybrid_3pass_time = benchmark_kernel(
+                    hybrid_3pass, Q, K, V, scale, False,  # non-causal
+                    warmup=args.warmup, iters=args.iters
+                )
+                results["hybrid_3pass"][seq_len] = hybrid_3pass_time
+                print(f"  Hybrid 3-pass:        {hybrid_3pass_time:.3f} ms")
+            except Exception as e:
+                print(f"  Hybrid 3-pass:        FAILED ({e})")
+                results["hybrid_3pass"][seq_len] = float('inf')
+        else:
+            results["hybrid_3pass"][seq_len] = float('inf')
 
-        # Egglog-generated 2-pass (non-causal)
-        try:
-            egg_2pass_time = benchmark_kernel(
-                egg_2pass, Q, K, V, scale, False,  # non-causal
-                warmup=args.warmup, iters=args.iters
-            )
-            results["egg_2pass"][seq_len] = egg_2pass_time
-            print(f"  Egg 2-pass:           {egg_2pass_time:.3f} ms (non-causal)")
-        except Exception as e:
-            print(f"  Egg 2-pass:           FAILED ({e})")
-            results["egg_2pass"][seq_len] = float('inf')
+        # Hybrid 2-pass (non-causal)
+        if HYBRID_2PASS_AVAILABLE:
+            try:
+                hybrid_2pass_time = benchmark_kernel(
+                    hybrid_2pass, Q, K, V, scale, False,  # non-causal
+                    warmup=args.warmup, iters=args.iters
+                )
+                results["hybrid_2pass"][seq_len] = hybrid_2pass_time
+                print(f"  Hybrid 2-pass:        {hybrid_2pass_time:.3f} ms")
+            except Exception as e:
+                print(f"  Hybrid 2-pass:        FAILED ({e})")
+                results["hybrid_2pass"][seq_len] = float('inf')
+        else:
+            results["hybrid_2pass"][seq_len] = float('inf')
 
         # Clear cache between sequence lengths
         torch.cuda.empty_cache()
@@ -349,7 +373,7 @@ def main():
     print("BENCHMARK SUMMARY")
     print("=" * 90)
 
-    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12} {'Egg3Pass':<10} {'Egg2Pass':<10}"
+    header = f"{'Seq Len':<10} {'Eager':<10} {'SDPA':<10} {'Triton':<10} {'TrulyNaive':<12} {'Hybrid3P':<10} {'Hybrid2P':<10}"
     print(header)
     print("-" * 72)
 
@@ -358,16 +382,16 @@ def main():
         sdpa_t = results["sdpa"].get(seq_len, float('inf'))
         triton_t = results["triton"].get(seq_len, float('inf'))
         truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
-        egg_3pass_t = results["egg_3pass"].get(seq_len, float('inf'))
-        egg_2pass_t = results["egg_2pass"].get(seq_len, float('inf'))
+        hybrid_3pass_t = results["hybrid_3pass"].get(seq_len, float('inf'))
+        hybrid_2pass_t = results["hybrid_2pass"].get(seq_len, float('inf'))
 
         row = f"{seq_len:<10} "
         row += f"{eager_t:<10.2f} " if eager_t != float('inf') else f"{'SKIP':<10} "
         row += f"{sdpa_t:<10.2f} " if sdpa_t != float('inf') else f"{'FAIL':<10} "
         row += f"{triton_t:<10.2f} " if triton_t != float('inf') else f"{'FAIL':<10} "
         row += f"{truly_naive_t:<12.2f} " if truly_naive_t != float('inf') else f"{'FAIL':<12} "
-        row += f"{egg_3pass_t:<10.2f} " if egg_3pass_t != float('inf') else f"{'FAIL':<10} "
-        row += f"{egg_2pass_t:<10.2f}" if egg_2pass_t != float('inf') else f"{'FAIL':<10}"
+        row += f"{hybrid_3pass_t:<10.2f} " if hybrid_3pass_t != float('inf') else f"{'N/A':<10} "
+        row += f"{hybrid_2pass_t:<10.2f}" if hybrid_2pass_t != float('inf') else f"{'N/A':<10}"
 
         print(row)
 
@@ -400,10 +424,12 @@ def main():
                 marker='^', linewidth=2, markersize=8, label='Triton (online)', color='#2ecc71')
         ax1.plot(valid_seq_lens, [results["truly_naive"][s] for s in valid_seq_lens],
                 marker='d', linewidth=2, markersize=8, label='Triton (3-pass)', color='#9b59b6')
-        ax1.plot(valid_seq_lens, [results["egg_3pass"][s] for s in valid_seq_lens],
-                marker='x', linewidth=2, markersize=8, label='Egg 3-pass', color='#f39c12')
-        ax1.plot(valid_seq_lens, [results["egg_2pass"][s] for s in valid_seq_lens],
-                marker='*', linewidth=2, markersize=10, label='Egg 2-pass', color='#1abc9c')
+        if HYBRID_3PASS_AVAILABLE:
+            ax1.plot(valid_seq_lens, [results["hybrid_3pass"][s] for s in valid_seq_lens],
+                    marker='x', linewidth=2, markersize=8, label='Hybrid 3-pass', color='#f39c12')
+        if HYBRID_2PASS_AVAILABLE:
+            ax1.plot(valid_seq_lens, [results["hybrid_2pass"][s] for s in valid_seq_lens],
+                    marker='*', linewidth=2, markersize=10, label='Hybrid 2-pass', color='#1abc9c')
 
     ax1.set_xlabel('Sequence Length', fontsize=12)
     ax1.set_ylabel('Time (ms)', fontsize=12)
@@ -476,15 +502,15 @@ def main():
     # Save CSV
     csv_path = os.path.join(results_dir, f'kernel_benchmark_h{num_heads}_d{head_dim}.csv')
     with open(csv_path, 'w') as f:
-        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Egg_3pass_ms,Egg_2pass_ms\n")
+        f.write("Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Hybrid_3pass_ms,Hybrid_2pass_ms\n")
         for seq_len in valid_seq_lens:
             eager_t = results["eager"].get(seq_len, float('inf'))
             truly_naive_t = results["truly_naive"].get(seq_len, float('inf'))
-            egg_3pass_t = results["egg_3pass"].get(seq_len, float('inf'))
-            egg_2pass_t = results["egg_2pass"].get(seq_len, float('inf'))
+            hybrid_3pass_t = results["hybrid_3pass"].get(seq_len, float('inf'))
+            hybrid_2pass_t = results["hybrid_2pass"].get(seq_len, float('inf'))
             f.write(f"{seq_len},{eager_t:.3f},{results['sdpa'][seq_len]:.3f},"
                     f"{results['triton'][seq_len]:.3f},{truly_naive_t:.3f},"
-                    f"{egg_3pass_t:.3f},{egg_2pass_t:.3f}\n")
+                    f"{hybrid_3pass_t:.3f},{hybrid_2pass_t:.3f}\n")
     print(f"Results saved to: {csv_path}")
 
 

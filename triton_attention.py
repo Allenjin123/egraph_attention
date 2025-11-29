@@ -773,6 +773,132 @@ def verify_model_correctness(
 
 
 # ============================================================================
+# Generated Hybrid Kernel Injection (from egglog)
+# ============================================================================
+
+# Try to import generated hybrid kernels
+try:
+    from generated_hybrid_2pass import egg_attention_hybrid_2pass
+    HYBRID_2PASS_AVAILABLE = True
+except ImportError:
+    HYBRID_2PASS_AVAILABLE = False
+
+try:
+    from generated_hybrid_3pass import egg_attention_hybrid
+    HYBRID_3PASS_AVAILABLE = True
+except ImportError:
+    HYBRID_3PASS_AVAILABLE = False
+
+
+def hybrid_2pass_attention_for_model(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Wrapper for hybrid 2-pass attention (generated from egglog).
+    Matches HuggingFace's attention function signature.
+    """
+    if not HYBRID_2PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_2pass.py not found")
+
+    # Handle GQA
+    num_heads_q = query.shape[1]
+    num_heads_kv = key.shape[1]
+    if num_heads_kv != num_heads_q:
+        num_groups = num_heads_q // num_heads_kv
+        key = key.repeat_interleave(num_groups, dim=1)
+        value = value.repeat_interleave(num_groups, dim=1)
+
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
+
+    # Call hybrid 2-pass kernel (non-causal for now)
+    output = egg_attention_hybrid_2pass(query, key, value, scale=scaling)
+
+    # Transpose to [batch, seq, heads, dim] for HuggingFace
+    output = output.transpose(1, 2).contiguous()
+    return output, None
+
+
+def hybrid_3pass_attention_for_model(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Wrapper for hybrid 3-pass attention (generated from egglog).
+    Matches HuggingFace's attention function signature.
+    """
+    if not HYBRID_3PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_3pass.py not found")
+
+    # Handle GQA
+    num_heads_q = query.shape[1]
+    num_heads_kv = key.shape[1]
+    if num_heads_kv != num_heads_q:
+        num_groups = num_heads_q // num_heads_kv
+        key = key.repeat_interleave(num_groups, dim=1)
+        value = value.repeat_interleave(num_groups, dim=1)
+
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
+
+    # Call hybrid 3-pass kernel (non-causal for now)
+    output = egg_attention_hybrid(query, key, value, scale=scaling)
+
+    # Transpose to [batch, seq, heads, dim] for HuggingFace
+    output = output.transpose(1, 2).contiguous()
+    return output, None
+
+
+def inject_hybrid_2pass_attention(model) -> str:
+    """
+    Inject hybrid 2-pass attention (generated from egglog) into a HuggingFace model.
+    """
+    if not HYBRID_2PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_2pass.py not found. Run egg_to_triton.py first.")
+
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    original_impl = getattr(model.config, '_attn_implementation', 'eager')
+    ALL_ATTENTION_FUNCTIONS["hybrid_2pass"] = hybrid_2pass_attention_for_model
+    model.config._attn_implementation = "hybrid_2pass"
+
+    print(f"Injected hybrid 2-pass attention (original: {original_impl})")
+    return original_impl
+
+
+def inject_hybrid_3pass_attention(model) -> str:
+    """
+    Inject hybrid 3-pass attention (generated from egglog) into a HuggingFace model.
+    """
+    if not HYBRID_3PASS_AVAILABLE:
+        raise RuntimeError("generated_hybrid_3pass.py not found. Run egg_to_triton.py first.")
+
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    original_impl = getattr(model.config, '_attn_implementation', 'eager')
+    ALL_ATTENTION_FUNCTIONS["hybrid_3pass"] = hybrid_3pass_attention_for_model
+    model.config._attn_implementation = "hybrid_3pass"
+
+    print(f"Injected hybrid 3-pass attention (original: {original_impl})")
+    return original_impl
+
+
+# ============================================================================
 # Standalone Testing
 # ============================================================================
 

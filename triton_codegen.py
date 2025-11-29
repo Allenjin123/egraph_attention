@@ -808,7 +808,7 @@ def generate_code(graph: ComputationGraph, strategy: str = 'fused') -> str:
 
     Args:
         graph: Parsed computation graph
-        strategy: 'composable', 'fused', or 'auto' (auto-detect algorithm)
+        strategy: 'composable', 'fused', 'hybrid', or 'auto'
 
     Returns:
         Generated Python/Triton code as string
@@ -824,6 +824,9 @@ def generate_code(graph: ComputationGraph, strategy: str = 'fused') -> str:
         else:
             print(f"Detected 3-pass attention algorithm")
             codegen = FusedCodeGen(graph)
+    elif strategy == 'hybrid':
+        # Use new hybrid approach with scaffolds + graph-derived ops
+        codegen = HybridCodeGen(graph)
     elif strategy == 'auto':
         algo = detect_algorithm(graph)
         if algo == '2pass':
@@ -834,3 +837,103 @@ def generate_code(graph: ComputationGraph, strategy: str = 'fused') -> str:
         raise ValueError(f"Unknown strategy: {strategy}")
 
     return codegen.generate()
+
+
+# ============================================================================
+# Hybrid Code Generator (Phase 2)
+# ============================================================================
+
+class HybridCodeGen:
+    """
+    Hybrid code generator using scaffolds + graph-derived operations.
+
+    This combines:
+    - Template scaffolds for kernel structure (loops, memory access)
+    - Graph analysis for algorithm detection
+    - Operation emitter for customization
+    """
+
+    def __init__(self, graph: ComputationGraph):
+        self.graph = graph
+        # Import here to avoid circular dependencies
+        from algorithm_detector import AlgorithmDetector, AlgorithmType
+        from kernel_scaffolds import ThreePassScaffold, TwoPassScaffold
+        from operation_emitter import HoleEmitter, generate_wrapper
+
+        self.AlgorithmType = AlgorithmType
+        self.ThreePassScaffold = ThreePassScaffold
+        self.TwoPassScaffold = TwoPassScaffold
+        self.HoleEmitter = HoleEmitter
+        self.generate_wrapper = generate_wrapper
+
+        # Detect algorithm
+        self.detector = AlgorithmDetector(graph)
+        self.info = self.detector.detect()
+
+    def generate(self) -> str:
+        """Generate hybrid Triton implementation."""
+        code = [IMPORTS_TEMPLATE]
+
+        # Select scaffold based on algorithm
+        if self.info.algorithm == self.AlgorithmType.TWO_PASS:
+            scaffold = self.TwoPassScaffold()
+            wrapper = self.generate_wrapper('2pass')
+        else:
+            scaffold = self.ThreePassScaffold()
+            wrapper = self.generate_wrapper('3pass')
+
+        # Fill scaffold holes with graph-derived operations
+        emitter = self.HoleEmitter(self.graph, scaffold)
+        emitter.fill_all_holes()
+
+        # Generate kernel
+        code.append(scaffold.generate())
+
+        # Add wrapper
+        code.append(wrapper)
+
+        # Add test
+        code.append(self._generate_test())
+
+        return '\n'.join(code)
+
+    def _generate_test(self) -> str:
+        """Generate test code."""
+        func_name = 'egg_attention_hybrid'
+        if self.info.algorithm == self.AlgorithmType.TWO_PASS:
+            func_name = 'egg_attention_hybrid_2pass'
+
+        return f'''
+
+# ===== Test =====
+if __name__ == "__main__":
+    import torch
+
+    torch.manual_seed(42)
+    batch_size = 1
+    num_heads = 4
+    seq_len = 256
+    head_dim = 64
+
+    Q = torch.randn(batch_size, num_heads, seq_len, head_dim,
+                    device='cuda', dtype=torch.float16)
+    K = torch.randn_like(Q)
+    V = torch.randn_like(Q)
+
+    # Run hybrid attention
+    out = {func_name}(Q, K, V)
+    print(f"Output shape: {{out.shape}}")
+
+    # Compare with PyTorch reference
+    scale = 1.0 / math.sqrt(head_dim)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
+    attn = torch.softmax(scores, dim=-1, dtype=torch.float32).to(Q.dtype)
+    ref = torch.matmul(attn, V)
+
+    diff = (out - ref).abs().max().item()
+    print(f"Max diff vs reference: {{diff:.6f}}")
+    if diff < 0.01:
+        print("PASSED!")
+    else:
+        print("FAILED - outputs differ")
+'''

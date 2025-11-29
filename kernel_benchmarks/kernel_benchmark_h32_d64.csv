@@ -1,5 +1,4 @@
-Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Egg_3pass_ms,Egg_2pass_ms
-256,0.050,0.011,0.015,0.024,0.020,0.015
-512,0.186,0.034,0.041,0.072,0.083,0.048
-1024,1.703,0.092,0.133,0.267,0.234,0.167
-2048,7.390,0.256,0.457,0.976,0.883,0.593
+Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Hybrid_3pass_ms,Hybrid_2pass_ms
+256,0.031,0.011,0.014,0.020,0.020,0.015
+512,0.158,0.036,0.043,0.079,0.083,0.053
+1024,1.290,0.124,0.121,0.248,0.257,0.178

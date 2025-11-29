@@ -10,203 +10,84 @@ import math
 from typing import Optional
 
 
-
-# ===== Fused 3-Pass Attention Kernel =====
-# Generated from egglog computation graph
-
-@triton.jit
-def _egg_attention_kernel(
-    Q_ptr, K_ptr, V_ptr, Out_ptr,
-    stride_qb, stride_qh, stride_qm, stride_qk,
-    stride_kb, stride_kh, stride_kn, stride_kk,
-    stride_vb, stride_vh, stride_vn, stride_vk,
-    stride_ob, stride_oh, stride_om, stride_ok,
-    batch_size, num_heads, seq_len_q, seq_len_k, head_dim,
-    scale,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
+def egg_attention_pytorch(Q, K, V, scale=None):
     """
-    Fused attention kernel generated from egglog 3-pass representation.
-
-    Implements:
-    1. QK = sum_e(Q[e,p] * K[e,m]) * scale  -> [m,p]
-    2. GM = max_m(QK)                        -> [p]
-    3. SN = exp(QK - GM)                     -> [m,p]
-    4. SD = sum_m(SN)                        -> [p]
-    5. A = SN / SD                           -> [m,p]
-    6. Out = sum_m(A * V)                    -> [f,p]
-    """
-    pid_batch = tl.program_id(0)
-    pid_head = tl.program_id(1)
-    pid_m = tl.program_id(2)
-
-    # Query block offsets
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_k = tl.arange(0, BLOCK_K)
-
-    # Load Q block
-    q_ptrs = Q_ptr + (pid_batch * stride_qb + pid_head * stride_qh +
-                      offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)
-    q_mask = (offs_m[:, None] < seq_len_q) & (offs_k[None, :] < head_dim)
-    q = tl.load(q_ptrs, mask=q_mask, other=0.0)
-
-    # Initialize for 3-pass
-    row_max = tl.full([BLOCK_M], value=-float('inf'), dtype=tl.float32)
-
-    # ===== PASS 1: Compute QK and find row-wise max =====
-    num_blocks_n = tl.cdiv(seq_len_k, BLOCK_N)
-    for block_n in range(num_blocks_n):
-        start_n = block_n * BLOCK_N
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-
-        # Load K block
-        k_ptrs = K_ptr + (pid_batch * stride_kb + pid_head * stride_kh +
-                          offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
-        k_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
-        k = tl.load(k_ptrs, mask=k_mask, other=0.0)
-
-        # QK = Q @ K^T * scale
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk = tl.dot(q, tl.trans(k), qk)
-        qk *= scale
-
-        # Causal mask (optional)
-        # qk = tl.where(offs_m[:, None] >= offs_n[None, :], qk, float('-inf'))
-        qk = tl.where(offs_n[None, :] < seq_len_k, qk, float('-inf'))
-
-        # Update row max
-        block_max = tl.max(qk, axis=1)
-        row_max = tl.maximum(row_max, block_max)
-
-    # ===== PASS 2: Compute exp sum =====
-    row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for block_n in range(num_blocks_n):
-        start_n = block_n * BLOCK_N
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-
-        k_ptrs = K_ptr + (pid_batch * stride_kb + pid_head * stride_kh +
-                          offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
-        k_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
-        k = tl.load(k_ptrs, mask=k_mask, other=0.0)
-
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk = tl.dot(q, tl.trans(k), qk)
-        qk *= scale
-        qk = tl.where(offs_n[None, :] < seq_len_k, qk, float('-inf'))
-
-        p = tl.exp(qk - row_max[:, None])
-        row_sum += tl.sum(p, axis=1)
-
-    # ===== PASS 3: Compute output =====
-    acc = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)
-    for block_n in range(num_blocks_n):
-        start_n = block_n * BLOCK_N
-        offs_n = start_n + tl.arange(0, BLOCK_N)
-
-        k_ptrs = K_ptr + (pid_batch * stride_kb + pid_head * stride_kh +
-                          offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
-        k_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
-        k = tl.load(k_ptrs, mask=k_mask, other=0.0)
-
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk = tl.dot(q, tl.trans(k), qk)
-        qk *= scale
-        qk = tl.where(offs_n[None, :] < seq_len_k, qk, float('-inf'))
-
-        # Normalized attention weights
-        p = tl.exp(qk - row_max[:, None]) / row_sum[:, None]
-
-        # Load V and accumulate
-        v_ptrs = V_ptr + (pid_batch * stride_vb + pid_head * stride_vh +
-                          offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk)
-        v_mask = (offs_n[:, None] < seq_len_k) & (offs_k[None, :] < head_dim)
-        v = tl.load(v_ptrs, mask=v_mask, other=0.0)
-
-        acc += tl.dot(p.to(v.dtype), v)
-
-    # Store output
-    out_ptrs = Out_ptr + (pid_batch * stride_ob + pid_head * stride_oh +
-                          offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok)
-    out_mask = (offs_m[:, None] < seq_len_q) & (offs_k[None, :] < head_dim)
-    tl.store(out_ptrs, acc.to(Out_ptr.dtype.element_ty), mask=out_mask)
-
-
-
-def egg_attention_triton(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    scale: float = None,
-) -> torch.Tensor:
-    """
-    Attention implementation generated from egglog (Triton kernel).
-
+    Attention implementation generated from egglog.
+    Uses PyTorch operations for correctness verification.
+    
     Args:
-        q: Query tensor [batch, heads, seq_q, dim]
-        k: Key tensor [batch, heads, seq_k, dim]
-        v: Value tensor [batch, heads, seq_k, dim]
-        scale: Scaling factor (default: 1/sqrt(dim))
-
-    Returns:
-        Output tensor [batch, heads, seq_q, dim]
+        Q: Query tensor [head_dim, seq_len] or [batch, heads, seq, dim]
+        K: Key tensor [head_dim, seq_len]
+        V: Value tensor [head_dim, seq_len]
+        scale: Scaling factor (default: 1/sqrt(head_dim))
     """
-    batch_size, num_heads, seq_len_q, head_dim = q.shape
-    _, _, seq_len_k, _ = k.shape
+    # Handle different input formats
+    if Q.dim() == 4:
+        # [batch, heads, seq, dim] -> process each head
+        batch, heads, seq_len, head_dim = Q.shape
+        Q = Q.permute(0, 1, 3, 2)  # [batch, heads, dim, seq]
+        K = K.permute(0, 1, 3, 2)
+        V = V.permute(0, 1, 3, 2)
+        # Reshape for processing
+        Q = Q.reshape(-1, head_dim, seq_len)  # [batch*heads, dim, seq]
+        K = K.reshape(-1, head_dim, seq_len)
+        V = V.reshape(-1, head_dim, seq_len)
+        multi_head = True
+    else:
+        # Assume [dim, seq] format
+        head_dim, seq_len = Q.shape
+        batch, heads = 1, 1
+        Q = Q.unsqueeze(0)
+        K = K.unsqueeze(0)
+        V = V.unsqueeze(0)
+        multi_head = False
 
     if scale is None:
         scale = 1.0 / math.sqrt(head_dim)
 
-    out = torch.empty_like(q)
+    # ===== Computation Graph =====
+    M_mul_emp = Q.unsqueeze(2) * K.unsqueeze(3)  # [batch, e, m, p]
+    R_add_e = M_mul_emp.sum(dim=1)  # reduce e -> [batch, m, p]
+    R_max_m = R_add_e.max(dim=1)[0]  # reduce m -> [batch, p]
+    M_sub_mp = R_add_e - R_max_m.unsqueeze(1)  # broadcast subtract
+    M_exp_mp = torch.exp(M_sub_mp)
+    R_add_m = M_exp_mp.sum(dim=-2)  # reduce m
+    M_div_mp = M_exp_mp / R_add_m.unsqueeze(-2)  # broadcast divide
+    M_mul_fmp = M_div_mp.unsqueeze(1) * V.unsqueeze(3)  # [batch, f, m, p]
+    R_add_m_1 = M_mul_fmp.sum(dim=-2)  # reduce m
 
-    # Block sizes
-    BLOCK_M = 64
-    BLOCK_N = 64
-    BLOCK_K = triton.next_power_of_2(head_dim)
-
-    # Grid
-    grid = (batch_size, num_heads, triton.cdiv(seq_len_q, BLOCK_M))
-
-    _egg_attention_kernel[grid](
-        q, k, v, out,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-        batch_size, num_heads, seq_len_q, seq_len_k, head_dim,
-        scale,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-    )
-
-    return out
-
+    # ===== Output =====
+    if multi_head:
+        # Reshape back to [batch, heads, seq, dim]
+        out = R_add_m_1.reshape(batch, heads, head_dim, seq_len)
+        out = out.permute(0, 1, 3, 2)
+        return out
+    else:
+        return R_add_m_1.squeeze(0)
 
 
 # ===== Test =====
 if __name__ == "__main__":
     import torch
 
+    # Test with simple inputs
     torch.manual_seed(42)
-    batch_size = 1
-    num_heads = 4
-    seq_len = 256
     head_dim = 64
+    seq_len = 128
 
-    Q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                    device='cuda', dtype=torch.float16)
-    K = torch.randn_like(Q)
-    V = torch.randn_like(Q)
+    Q = torch.randn(head_dim, seq_len, device='cuda', dtype=torch.float32)
+    K = torch.randn(head_dim, seq_len, device='cuda', dtype=torch.float32)
+    V = torch.randn(head_dim, seq_len, device='cuda', dtype=torch.float32)
 
     # Run generated attention
-    out = egg_attention_triton(Q, K, V)
+    out = egg_attention_pytorch(Q, K, V)
     print(f"Output shape: {out.shape}")
 
-    # Compare with PyTorch reference
-    scale = 1.0 / math.sqrt(head_dim)
-    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
-    attn = torch.softmax(scores, dim=-1, dtype=torch.float32).to(Q.dtype)
-    ref = torch.matmul(attn, V)
+    # Compare with reference
+    scale = 1.0 / (head_dim ** 0.5)
+    scores = torch.matmul(Q.T, K) * scale  # [seq, seq]
+    attn = torch.softmax(scores, dim=-1)
+    ref = torch.matmul(attn, V.T).T  # [dim, seq]
 
     diff = (out - ref).abs().max().item()
     print(f"Max diff vs reference: {diff:.6f}")

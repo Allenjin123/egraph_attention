@@ -52,9 +52,9 @@ Examples:
     )
     parser.add_argument(
         '--strategy',
-        choices=['composable', 'fused'],
+        choices=['composable', 'fused', 'hybrid'],
         default='fused',
-        help='Code generation strategy (default: fused)'
+        help='Code generation strategy: fused (hardcoded), hybrid (scaffolds + graph), composable (PyTorch)'
     )
     parser.add_argument(
         '--print-graph',
