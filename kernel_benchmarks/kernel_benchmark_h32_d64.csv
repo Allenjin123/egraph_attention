@@ -1,5 +1,4 @@
-Sequence_Length,Eager_ms,SDPA_ms,Triton_online_ms,Triton_3pass_ms,Hybrid_3pass_ms,Hybrid_2pass_ms,PyTorch_GD_ms,PyTorch_Compiled_ms,Triton_GD_ms
-256,0.027,0.010,0.014,0.019,0.019,0.015,2.205,0.198,0.013
-512,0.161,0.030,0.033,0.067,0.089,0.047,8.639,3.228,0.044
-1024,1.196,0.135,0.109,0.246,0.251,0.174,41.701,13.587,0.164
-2048,4.912,0.423,0.460,0.927,0.919,0.636,inf,54.572,0.666
+Sequence_Length,Eager_ms,SDPA_ms,Triton_ms,PyTorch_ms,TritonGD_ms
+256,0.029,0.011,0.019,0.190,0.013
+512,0.138,0.030,0.032,3.179,0.044
+1024,1.145,0.115,0.118,12.813,0.164

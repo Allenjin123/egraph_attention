@@ -6,35 +6,36 @@
 ; ============================================================
 
 (datatype Tensor
-  (CreateTensor i64 i64 String)
+  (CreateTensor i64 i64 String :cost 0)
 
-  ; Tiling operations
-  (T_split_m_m1m0 Tensor i64)      ; Split m into tiles
-  (T_unsplit_m1m0_m Tensor)        ; Combine tiles back
+  ; Tiling operations - expensive (favor non-tiled 3-pass)
+  (T_split_m_m1m0 Tensor i64 :cost 100)    ; Split m into tiles = expensive
+  (T_unsplit_m1m0_m Tensor :cost 100)      ; Combine tiles back = expensive
 
   ; Map operations (element-wise, no reduction)
-  (M_mul_emp Tensor Tensor)        ; Multiply over {e,m,p}
-  (M_mul_em1m0p Tensor Tensor)     ; Multiply over {e,m1,m0,p}
-  (M_mul_fmp Tensor Tensor)        ; Multiply over {f,m,p}
-  (M_sub_mp Tensor Tensor)         ; Subtract over {m,p}
-  (M_sub_m1m0p Tensor Tensor)      ; Subtract over {m1,m0,p}
-  (M_sub_m1p Tensor Tensor)        ; Subtract over {m1,p}
-  (M_exp_mp Tensor)                ; Exp over {m,p}
-  (M_exp_m1m0p Tensor)             ; Exp over {m1,m0,p}
-  (M_exp_m1p Tensor)               ; Exp over {m1,p}
-  (M_div_mp Tensor Tensor)         ; Divide over {m,p}
-  (M_div_m1m0p Tensor Tensor)      ; Divide over {m1,m0,p}
-  (M_mul_m1m0p Tensor Tensor)      ; Multiply over {m1,m0,p}
-  (M_mul_m1p Tensor Tensor)        ; Multiply over {m1,p}
+  (M_mul_emp Tensor Tensor :cost 1)        ; Non-tiled = cheap (3-pass)
+  (M_mul_em1m0p Tensor Tensor :cost 10)    ; Tiled = expensive
+  (M_mul_fmp Tensor Tensor :cost 1)        ; Multiply over {f,m,p}
+  (M_sub_mp Tensor Tensor :cost 1)         ; Non-tiled = cheap (3-pass)
+  (M_sub_m1m0p Tensor Tensor :cost 10)     ; Tiled = expensive
+  (M_sub_m1p Tensor Tensor :cost 10)       ; Correction factor = expensive
+  (M_exp_mp Tensor :cost 1)                ; Non-tiled = cheap (3-pass)
+  (M_exp_m1m0p Tensor :cost 10)            ; Tiled = expensive
+  (M_exp_m1p Tensor :cost 10)              ; Correction factor = expensive
+  (M_div_mp Tensor Tensor :cost 1)         ; In-loop division = cheap (3-pass)
+  (M_div_m1m0p Tensor Tensor :cost 50)     ; Tiled in-loop division = expensive
+  (M_mul_m1m0p Tensor Tensor :cost 10)     ; Correction multiply = expensive
+  (M_mul_m1p Tensor Tensor :cost 10)       ; Correction multiply = expensive
+  (M_div_fp Tensor Tensor :cost 100)       ; Post-loop division = expensive (2-pass)
 
   ; Reduce operations (collapse dimension)
-  (R_add_e Tensor)                 ; Sum over e dimension
-  (R_add_m Tensor)                 ; Sum over m dimension
-  (R_add_m0 Tensor)                ; Sum over m0 dimension (within tile)
-  (R_add_m1 Tensor)                ; Sum over m1 dimension (across tiles)
-  (R_max_m Tensor)                 ; Max over m dimension
-  (R_max_m0 Tensor)                ; Max over m0 dimension (within tile)
-  (R_max_m1 Tensor)                ; Max over m1 dimension (across tiles)
+  (R_add_e Tensor :cost 1)                 ; Sum over e dimension
+  (R_add_m Tensor :cost 1)                 ; Global reduction = cheap (3-pass)
+  (R_add_m0 Tensor :cost 10)               ; Local reduction = expensive
+  (R_add_m1 Tensor :cost 100)              ; Cross-tile reduction = very expensive
+  (R_max_m Tensor :cost 1)                 ; Global reduction = cheap (3-pass)
+  (R_max_m0 Tensor :cost 10)               ; Local reduction = expensive
+  (R_max_m1 Tensor :cost 100)              ; Cross-tile reduction = very expensive
 )
 
 ; ============================================================
@@ -42,67 +43,79 @@
 ; ============================================================
 ; These rules transform 3-pass attention to 2-pass by:
 ; 1. Inserting tiling of K
-; 2. Converting global operations to local-then-global
-; 3. Adding correction factors
+; 2. Converting global reductions to local-then-global
+; 3. Computing correction factors for numerical stability
+; 4. Using post-loop normalization
+;
+; Strategy: First add tiled versions WITHOUT subsume, then use
+; rules to construct the 2-pass pattern, then extract optimal.
 ; ============================================================
 
 ; Rule 1: Insert tiling of K in matrix multiplication
-; This is the key transformation enabled by split M/R design!
-; Use :subsume to replace original with tiled version
 (rewrite
   (M_mul_emp q k)
-  (M_mul_em1m0p q (T_split_m_m1m0 k 4))
-  :subsume)
+  (M_mul_em1m0p q (T_split_m_m1m0 k 4)))
 
 ; Rule 2: Transform global max to local-then-global pattern
 (rewrite
   (R_max_m qk)
-  (R_max_m1 (R_max_m0 qk))
-  :subsume)
+  (R_max_m1 (R_max_m0 qk)))
 
 ; Rule 3: Transform global sum to local-then-global pattern
 (rewrite
   (R_add_m exp_vals)
-  (R_add_m1 (R_add_m0 exp_vals))
-  :subsume)
+  (R_add_m1 (R_add_m0 exp_vals)))
 
-; Rule 4: Adapt subtraction for tiled dimensions
-; Use simplified rule with subsume
-(rewrite
-  (M_sub_mp qk gm)
-  (M_sub_m1m0p qk (R_max_m0 qk))
-  :subsume)
-
-; Rule 5: Adapt exp for tiled dimensions
+; Rule 4: Adapt exp for tiled dimensions
 (rewrite
   (M_exp_mp shifted)
-  (M_exp_m1m0p shifted)
-  :subsume)
+  (M_exp_m1m0p shifted))
 
-; Rule 6: Add correction factor computation
-; When we have local statistics, compute correction
-(rule
-  ((= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
-   (= lm (R_max_m0 bqk))
-   (= gm (R_max_m1 lm))
-   (= sld (R_add_m0 sln)))
-  ((let prm (M_exp_m1p (M_sub_m1p lm gm)))     ; Correction factor
-   (let cn (M_mul_m1m0p sln prm))              ; Corrected numerator
-   (let cd (M_mul_m1p sld prm))                ; Corrected denominator
-   (let gd (R_add_m1 cd)))                     ; Global denominator
-)
+; Rule 5: Subtraction uses LOCAL max for numerical stability
+; This enables the 2-pass structure where correction is applied later
+(rewrite
+  (M_sub_mp qk gm)
+  (M_sub_m1m0p qk (R_max_m0 qk)))
 
-; Rule 7: Transform division to tiled version
+; Rule 6: Transform division to tiled version
 (rewrite
   (M_div_mp sn sd)
-  (M_div_m1m0p sn sd)
-  :subsume)
+  (M_div_m1m0p sn sd))
 
-; Rule 8: Untile attention weights before final multiply
-(rewrite
-  (M_mul_fmp a v)
-  (M_mul_fmp (T_unsplit_m1m0_m a) v)
-  :when ((= a (M_div_m1m0p _ _)))
+; Run basic rewrites first
+(run 10)
+
+; Simpler approach: use a rule to first create correction structures
+; Then use another rewrite to transform the output
+
+; Step 1: Whenever we have local softmax, create correction factor
+(rule
+  ((= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
+   (= lm (R_max_m0 bqk)))
+  ((let gm (R_max_m1 lm))
+   (let prm (M_exp_m1p (M_sub_m1p lm gm)))
+   (let cn (M_mul_m1m0p sln prm))
+   (let sld (R_add_m0 sln))
+   (let cd (M_mul_m1p sld prm))
+   (let gd (R_add_m1 cd)))
+)
+
+(run 10)
+
+; Step 2: Transform output when correction exists
+; Match: any expression using M_div_m1m0p and M_mul_fmp with V
+(rule
+  ((= output (R_add_m1 (R_add_m0 (M_mul_fmp div_result v))))
+   (= div_result (M_div_m1m0p sln sum))
+   (= sln (M_exp_m1m0p (M_sub_m1m0p bqk lm)))
+   (= lm (R_max_m0 bqk))
+   (= cn (M_mul_m1m0p sln prm))
+   (= gd (R_add_m1 cd)))
+  ((let a_unnorm (T_unsplit_m1m0_m cn))
+   (let av_temp (M_mul_fmp a_unnorm v))
+   (let av_acc (R_add_m av_temp))
+   (let av_2pass (M_div_fp av_acc gd))
+   (union output av_2pass))
 )
 
 ; ============================================================
@@ -139,13 +152,13 @@
 (let AV (R_add_m AV_temp))           ; Reduce: sum over m dimension
 
 ; ============================================================
-; RUN TRANSFORMATION
+; RUN FINAL TRANSFORMATION
 ; ============================================================
 
-; Apply rewrite rules (multiple iterations for fixpoint)
-(run 30)
+; Apply final rules
+(run 20)
 
-; Extract final result - this will show the transformed 2-pass version
+; Extract final result - should show 2-pass version with M_div_fp at end
 (extract AV)
 
 ; ============================================================
