@@ -487,6 +487,7 @@ def main():
 
     ax1.set_xlabel('Sequence Length', fontsize=12)
     ax1.set_ylabel('Time (ms)', fontsize=12)
+    ax1.set_yscale('log')  # Log scale to handle large PyTorch times
     ax1.set_title(f'Attention Kernel Performance\n(heads={num_heads}, dim={head_dim})', fontsize=14, fontweight='bold')
     ax1.legend(loc='upper left', fontsize=11)
     ax1.grid(True, alpha=0.3)
