@@ -235,37 +235,7 @@
       "op": "M_div_fp",
       "children": [
         "function-3-R_add_m1",
-        "function-0-R_add_m1"
-      ],
-      "eclass": "Tensor-11",
-      "cost": 100.0,
-      "subsumed": false
-    },
-    "function-1-M_div_fp": {
-      "op": "M_div_fp",
-      "children": [
-        "function-3-R_add_m1",
-        "function-3-M_div_fp"
-      ],
-      "eclass": "Tensor-11",
-      "cost": 100.0,
-      "subsumed": false
-    },
-    "function-2-M_div_fp": {
-      "op": "M_div_fp",
-      "children": [
-        "function-3-R_add_m1",
         "function-2-R_add_m1"
-      ],
-      "eclass": "Tensor-11",
-      "cost": 100.0,
-      "subsumed": false
-    },
-    "function-3-M_div_fp": {
-      "op": "M_div_fp",
-      "children": [
-        "function-3-R_add_m1",
-        "function-3-R_add_m1"
       ],
       "eclass": "Tensor-11",
       "cost": 100.0,

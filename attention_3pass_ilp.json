@@ -1,9 +1,18 @@
 {
   "nodes": {
-    "primitive-String-2": {
-      "op": "\"V\"",
+    "function-0-R_max_m": {
+      "op": "R_max_m",
+      "children": [
+        "function-0-R_add_e"
+      ],
+      "eclass": "Tensor-5",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-i64-1024": {
+      "op": "1024",
       "children": [],
-      "eclass": "String-2",
+      "eclass": "i64-1024",
       "cost": 1.0,
       "subsumed": false
     },
@@ -14,13 +23,45 @@
       "cost": 1.0,
       "subsumed": false
     },
-    "function-0-M_mul_fmp": {
-      "op": "M_mul_fmp",
+    "function-1-R_add_m": {
+      "op": "R_add_m",
       "children": [
-        "function-0-M_div_mp",
-        "function-2-CreateTensor"
+        "function-0-M_mul_fmp"
       ],
-      "eclass": "Tensor-10",
+      "eclass": "Tensor-11",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-M_sub_mp": {
+      "op": "M_sub_mp",
+      "children": [
+        "function-0-R_add_e",
+        "function-0-R_max_m"
+      ],
+      "eclass": "Tensor-6",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-2": {
+      "op": "\"V\"",
+      "children": [],
+      "eclass": "String-2",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "function-0-R_add_e": {
+      "op": "R_add_e",
+      "children": [
+        "function-0-M_mul_emp"
+      ],
+      "eclass": "Tensor-4",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-i64-4": {
+      "op": "4",
+      "children": [],
+      "eclass": "i64-4",
       "cost": 1.0,
       "subsumed": false
     },
@@ -33,10 +74,28 @@
       "cost": 1.0,
       "subsumed": false
     },
-    "primitive-i64-4": {
-      "op": "4",
+    "function-2-CreateTensor": {
+      "op": "CreateTensor",
+      "children": [
+        "primitive-i64-64",
+        "primitive-i64-1024",
+        "primitive-String-2"
+      ],
+      "eclass": "Tensor-2",
+      "cost": 0.0,
+      "subsumed": false
+    },
+    "primitive-String-0": {
+      "op": "\"Q\"",
       "children": [],
-      "eclass": "i64-4",
+      "eclass": "String-0",
+      "cost": 1.0,
+      "subsumed": false
+    },
+    "primitive-String-1": {
+      "op": "\"K\"",
+      "children": [],
+      "eclass": "String-1",
       "cost": 1.0,
       "subsumed": false
     },
@@ -49,6 +108,16 @@
       "cost": 1.0,
       "subsumed": false
     },
+    "function-0-M_mul_emp": {
+      "op": "M_mul_emp",
+      "children": [
+        "function-0-CreateTensor",
+        "function-1-CreateTensor"
+      ],
+      "eclass": "Tensor-3",
+      "cost": 1.0,
+      "subsumed": false
+    },
     "function-0-M_div_mp": {
       "op": "M_div_mp",
       "children": [
@@ -56,31 +125,6 @@
         "function-0-R_add_m"
       ],
       "eclass": "Tensor-9",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "function-0-R_max_m": {
-      "op": "R_max_m",
-      "children": [
-        "function-0-R_add_e"
-      ],
-      "eclass": "Tensor-5",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "primitive-String-0": {
-      "op": "\"Q\"",
-      "children": [],
-      "eclass": "String-0",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "function-1-R_add_m": {
-      "op": "R_add_m",
-      "children": [
-        "function-0-M_mul_fmp"
-      ],
-      "eclass": "Tensor-11",
       "cost": 1.0,
       "subsumed": false
     },
@@ -95,50 +139,6 @@
       "cost": 0.0,
       "subsumed": false
     },
-    "function-2-CreateTensor": {
-      "op": "CreateTensor",
-      "children": [
-        "primitive-i64-64",
-        "primitive-i64-1024",
-        "primitive-String-2"
-      ],
-      "eclass": "Tensor-2",
-      "cost": 0.0,
-      "subsumed": false
-    },
-    "primitive-i64-1024": {
-      "op": "1024",
-      "children": [],
-      "eclass": "i64-1024",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "primitive-String-1": {
-      "op": "\"K\"",
-      "children": [],
-      "eclass": "String-1",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "function-0-M_mul_emp": {
-      "op": "M_mul_emp",
-      "children": [
-        "function-0-CreateTensor",
-        "function-1-CreateTensor"
-      ],
-      "eclass": "Tensor-3",
-      "cost": 1.0,
-      "subsumed": false
-    },
-    "function-0-R_add_e": {
-      "op": "R_add_e",
-      "children": [
-        "function-0-M_mul_emp"
-      ],
-      "eclass": "Tensor-4",
-      "cost": 1.0,
-      "subsumed": false
-    },
     "function-0-CreateTensor": {
       "op": "CreateTensor",
       "children": [
@@ -150,13 +150,13 @@
       "cost": 0.0,
       "subsumed": false
     },
-    "function-0-M_sub_mp": {
-      "op": "M_sub_mp",
+    "function-0-M_mul_fmp": {
+      "op": "M_mul_fmp",
       "children": [
-        "function-0-R_add_e",
-        "function-0-R_max_m"
+        "function-0-M_div_mp",
+        "function-2-CreateTensor"
       ],
-      "eclass": "Tensor-6",
+      "eclass": "Tensor-10",
       "cost": 1.0,
       "subsumed": false
     }
@@ -236,15 +236,15 @@
     "num_eclasses": 18,
     "num_nodes": 18,
     "selected_ops": [
+      "M_mul_fmp",
+      "M_mul_emp",
+      "M_div_mp",
+      "R_max_m",
+      "CreateTensor",
+      "R_add_e",
       "R_add_m",
       "M_exp_mp",
-      "M_mul_emp",
-      "R_max_m",
-      "M_div_mp",
-      "R_add_e",
-      "M_sub_mp",
-      "M_mul_fmp",
-      "CreateTensor"
+      "M_sub_mp"
     ]
   },
   "analysis": {
@@ -252,15 +252,15 @@
     "num_nodes": 12,
     "total_cost": 9,
     "op_counts": {
-      "R_add_m": 2,
-      "CreateTensor": 3,
-      "M_mul_fmp": 1,
       "M_exp_mp": 1,
-      "M_div_mp": 1,
-      "M_mul_emp": 1,
-      "R_add_e": 1,
+      "R_max_m": 1,
+      "CreateTensor": 3,
+      "R_add_m": 2,
       "M_sub_mp": 1,
-      "R_max_m": 1
+      "M_mul_emp": 1,
+      "M_div_mp": 1,
+      "M_mul_fmp": 1,
+      "R_add_e": 1
     },
     "algorithm_type": "3-pass (global)"
   }

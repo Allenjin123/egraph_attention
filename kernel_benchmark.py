@@ -53,22 +53,26 @@ except ImportError:
 
 # Import Triton graph-driven implementations (AUTO-GENERATED from ILP!)
 # Both kernels are automatically generated from ILP-extracted egglog JSON
-# Using 2pass-no-mdiv cost model to avoid M_div_fp duplicate children issue
+# Fixed: attention_rewrite.egg now keeps numerator/denominator in separate eclasses
 try:
-    from generated_triton_2pass_auto import attention_kernel_2pass
+    from generated_triton_2pass_ilp import attention_kernel_2pass_ilp as attention_kernel_2pass
     TRITON_GD_2PASS_AVAILABLE = True
 except ImportError:
     TRITON_GD_2PASS_AVAILABLE = False
-    print("Warning: generated_triton_2pass_auto.py not found")
-    print("  Generate with: python generate_triton_kernel.py attention_2pass.json -o generated_triton_2pass_auto.py")
+    print("Warning: generated_triton_2pass_ilp.py not found")
+    print("  Generate with:")
+    print("    python attention_ilp_extractor.py --input attention_rewrite.json --cost-model 2pass -o attention_2pass_ilp.json")
+    print("    python generate_triton_kernel.py attention_2pass_ilp.json -o generated_triton_2pass_ilp.py")
 
 try:
-    from generated_triton_3pass_auto import attention_kernel_auto as attention_kernel_3pass
+    from generated_triton_3pass_ilp import attention_kernel_3pass_ilp as attention_kernel_3pass
     TRITON_GD_3PASS_AVAILABLE = True
 except ImportError:
     TRITON_GD_3PASS_AVAILABLE = False
-    print("Warning: generated_triton_3pass_auto.py not found")
-    print("  Generate with: python generate_triton_kernel.py attention.json -o generated_triton_3pass_auto.py")
+    print("Warning: generated_triton_3pass_ilp.py not found")
+    print("  Generate with:")
+    print("    python attention_ilp_extractor.py --input attention_rewrite.json --cost-model 3pass -o attention_3pass_ilp.json")
+    print("    python generate_triton_kernel.py attention_3pass_ilp.json -o generated_triton_3pass_ilp.py")
 
 
 # ============================================================================

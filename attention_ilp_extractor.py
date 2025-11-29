@@ -42,8 +42,8 @@ COST_2PASS = {
     'R_max_m1': 10,      # Cross-tile max
     'R_add_m0': 1,       # Local sum
     'R_add_m1': 10,      # Cross-tile sum
-    'M_div_fp': 1,       # Post-loop division
-    'M_div_m1m0p': 5,    # Tiled in-loop division
+    'M_div_fp': 1,       # Post-loop division (PREFER this)
+    'M_div_m1m0p': 100,  # Tiled in-loop division (AVOID - gives wrong results)
     'M_exp_m1m0p': 1,    # Tiled exp
     'M_sub_m1m0p': 1,    # Tiled subtraction
     'M_sub_m1p': 1,      # Correction factor subtraction

@@ -595,6 +595,39 @@ class HoleEmitter:
                             acc_code = self._emit_global_reduction_accumulation(node, acc_name, analyzer)
                             for code_line in acc_code:
                                 lines.append(f"        {code_line}")
+                        # M_mul_fmp pattern: should be fused to dot product
+                        elif node.op in ('M_mul_fmp', 'M_mul_fm1m0p'):
+                            # Weighted V - emit as matmul
+                            if node.children:
+                                weight_var = self.op_emitter._get_child_var(node.children[0])
+                                lines.append(f"        # Weighted V (M_mul_fmp optimized to dot)")
+                                lines.append(f"        weighted_v = tl.dot({weight_var}.to(v.dtype), v)  # [BLOCK_M, BLOCK_K]")
+                                self.op_emitter.var_map[node.id] = TritonVar('weighted_v', '[BLOCK_M, BLOCK_K]')
+                            else:
+                                # Fallback to regular emission
+                                op_code = self.op_emitter.emit_operation(node)
+                                for code_line in op_code:
+                                    lines.append(f"        {code_line}")
+                        # R_add_m0 that reduces M_mul_fmp: skip (handled by R_add_m1)
+                        elif node.op == 'R_add_m0':
+                            # Check if this reduces M_mul_fmp
+                            if node.children and node.children[0] in self.graph.nodes:
+                                child = self.graph.nodes[node.children[0]]
+                                if child.op in ('M_mul_fmp', 'M_mul_fm1m0p'):
+                                    # Skip - M_mul_fmp already emitted as weighted_v
+                                    # Register this R_add_m0 as weighted_v too
+                                    self.op_emitter.var_map[node.id] = TritonVar('weighted_v', '[BLOCK_M, BLOCK_K]')
+                                    lines.append(f"        # R_add_m0 (weighted_v already computed via dot)")
+                                else:
+                                    # Regular R_add_m0
+                                    op_code = self.op_emitter.emit_operation(node)
+                                    for code_line in op_code:
+                                        lines.append(f"        {code_line}")
+                            else:
+                                # Regular operation
+                                op_code = self.op_emitter.emit_operation(node)
+                                for code_line in op_code:
+                                    lines.append(f"        {code_line}")
                         else:
                             # Regular operation
                             op_code = self.op_emitter.emit_operation(node)
